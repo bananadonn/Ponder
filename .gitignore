@@ -7,7 +7,6 @@ dist-ssr
 .env
 .env.local
 package-lock.json
-supabase/migrations/001_init.sql
 
 .vscode/*
 !.vscode/extensions.json
