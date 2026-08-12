@@ -4,6 +4,15 @@ import { corsHeaders } from '../_shared/cors.ts'
 import { EMBEDDING_MODEL, embedTexts } from '../_shared/openai.ts'
 import { EMOTION_LABELS } from '../_shared/emotionLabels.ts'
 
+// extractAllMetadata fires one concurrent OpenAI call per paragraph
+// (Promise.all, no concurrency limit) — unbounded input length means
+// unbounded concurrent requests, worse if a double-reprocess races with
+// itself. This caps total entry length generously enough that no realistic
+// journal entry ever hits it (~8,000 words), while still bounding the
+// worst case to something that can't overwhelm the Edge Function or OpenAI
+// rate limits.
+const MAX_CONTENT_LENGTH = 40_000
+
 // Bump this manually if chunking or embedding logic changes in a way that
 // warrants re-embedding everything (tracked here, not by OpenAI).
 const EMBEDDING_VERSION = 'v1'
@@ -96,6 +105,12 @@ async function processEntry(entryId: string) {
 
   if (fetchError || !entry) {
     throw new Error(`Entry not found: ${entryId}`)
+  }
+
+  if (entry.content.length > MAX_CONTENT_LENGTH) {
+    throw new Error(
+      `Entry content too long to process (${entry.content.length} chars, max ${MAX_CONTENT_LENGTH})`,
+    )
   }
 
   await admin.from('entries').update({ processing_status: 'processing' }).eq('id', entryId)
