@@ -19,13 +19,15 @@ const EMBEDDING_VERSION = 'v1'
 
 const EXTRACTION_MODEL = 'gpt-4o-mini'
 // Bump if the extraction prompt/schema changes enough to warrant re-tagging.
-const EXTRACTION_VERSION = 'v1'
+const EXTRACTION_VERSION = 'v2'
 
 const EXTRACTION_SYSTEM_PROMPT = `You extract structured metadata from a short excerpt of a personal journal entry.
 
 - emotion: the single dominant emotion expressed, chosen from the provided list (pick the closest match even if imperfect)
 - emotion_confidence: your confidence in that label, from 0 (low) to 1 (high)
-- intensity: how strongly the emotion is expressed, from 1 (barely present) to 5 (overwhelming)
+- secondary_emotion: a second emotion, only if another emotion is ALSO clearly and separately expressed alongside the dominant one (e.g. "proud but anxious about what's next") — chosen from the same provided list. Null if only one emotion is really present; do not force a second pick just to fill the field.
+- secondary_emotion_confidence: your confidence in secondary_emotion, from 0 (low) to 1 (high). Null if secondary_emotion is null.
+- intensity: how strongly the dominant emotion is expressed, from 1 (barely present) to 5 (overwhelming)
 - topics: concrete short noun phrases for what's being discussed
 - entities: proper nouns only — people, places, organizations mentioned by name
 
@@ -34,6 +36,8 @@ Base everything strictly on what is explicitly written. Do not infer a diagnosis
 interface ExtractedMetadata {
   emotion: string
   emotion_confidence: number
+  secondary_emotion: string | null
+  secondary_emotion_confidence: number | null
   intensity: number
   topics: string[]
   entities: string[]
@@ -72,11 +76,29 @@ async function extractMetadata(text: string): Promise<ExtractedMetadata> {
                 type: 'number',
                 description: 'Confidence in the emotion label, from 0 (low) to 1 (high).',
               },
+              secondary_emotion: {
+                type: ['string', 'null'],
+                enum: [...EMOTION_LABELS, null],
+                description:
+                  'A second emotion, only if clearly and separately expressed alongside the dominant one. Null if only one emotion is present.',
+              },
+              secondary_emotion_confidence: {
+                type: ['number', 'null'],
+                description: 'Confidence in secondary_emotion, from 0 (low) to 1 (high). Null if secondary_emotion is null.',
+              },
               intensity: { type: 'integer', enum: [1, 2, 3, 4, 5] },
               topics: { type: 'array', items: { type: 'string' } },
               entities: { type: 'array', items: { type: 'string' } },
             },
-            required: ['emotion', 'emotion_confidence', 'intensity', 'topics', 'entities'],
+            required: [
+              'emotion',
+              'emotion_confidence',
+              'secondary_emotion',
+              'secondary_emotion_confidence',
+              'intensity',
+              'topics',
+              'entities',
+            ],
             additionalProperties: false,
           },
         },
@@ -159,6 +181,8 @@ async function processEntry(entryId: string) {
       chunk_id: id,
       emotion: m.emotion,
       emotion_confidence: m.emotion_confidence,
+      secondary_emotion: m.secondary_emotion,
+      secondary_emotion_confidence: m.secondary_emotion_confidence,
       intensity: m.intensity,
       topics: m.topics,
       entities: m.entities,

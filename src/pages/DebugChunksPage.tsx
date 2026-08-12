@@ -139,6 +139,13 @@ export default function DebugChunksPage() {
                             {chunk.metadata.emotion_confidence != null &&
                               ` (${Math.round(chunk.metadata.emotion_confidence * 100)}%)`}
                           </span>
+                          {chunk.metadata.secondary_emotion != null && (
+                            <span className="rounded-full bg-indigo-50 px-2 py-0.5 text-xs font-medium text-indigo-500">
+                              {chunk.metadata.secondary_emotion}
+                              {chunk.metadata.secondary_emotion_confidence != null &&
+                                ` (${Math.round(chunk.metadata.secondary_emotion_confidence * 100)}%)`}
+                            </span>
+                          )}
                           {chunk.metadata.intensity != null && (
                             <span className="rounded-full bg-stone-200 px-2 py-0.5 text-xs font-medium text-stone-700">
                               intensity {chunk.metadata.intensity}/5

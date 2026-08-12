@@ -19,6 +19,8 @@ export type EntryUpdate = Partial<Pick<Entry, 'content' | 'metadata'>>
 export interface ChunkMetadata {
   emotion: string | null
   emotion_confidence: number | null
+  secondary_emotion: string | null
+  secondary_emotion_confidence: number | null
   intensity: number | null
   topics: string[] | null
   entities: string[] | null
