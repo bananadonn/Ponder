@@ -1,6 +1,6 @@
 import type { SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2'
 import { EMOTION_LABELS, type EmotionLabel } from './emotionLabels.ts'
-import { matchEmotionKeyword } from './emotionSynonyms.ts'
+import { matchEmotionKeywords } from './emotionSynonyms.ts'
 import { listKnownEntities, listKnownTopics, matchKnownVocab } from './vocabMatch.ts'
 
 const EXTRACTION_MODEL = 'gpt-4o-mini'
@@ -13,13 +13,13 @@ export interface ExtractedField<T> {
 }
 
 export interface QueryExtractionResult {
-  emotion: ExtractedField<EmotionLabel | null>
+  emotion: ExtractedField<EmotionLabel[]>
   topics: ExtractedField<string[]>
   entities: ExtractedField<string[]>
 }
 
 interface LlmExtractionResult {
-  emotion?: EmotionLabel | null
+  emotion?: EmotionLabel[]
   topics?: string[]
   entities?: string[]
 }
@@ -46,13 +46,13 @@ async function llmExtractFields(
 
   if (need.emotion) {
     properties.emotion = {
-      type: ['string', 'null'],
-      enum: [...EMOTION_LABELS, null],
-      description: 'The single emotion this question implies, or null if none clearly apply.',
+      type: 'array',
+      items: { type: 'string', enum: EMOTION_LABELS },
+      description: 'Every emotion from this exact list the question clearly implies. A question can genuinely imply more than one (e.g. "proud but anxious"). Empty array if none clearly apply.',
     }
     required.push('emotion')
     instructions.push(
-      `- emotion: does the question imply one of these specific emotions — ${EMOTION_LABELS.join(', ')}? Return that exact value if so, or null if there is no clear match. Never force a mapping.`,
+      `- emotion: does the question imply any of these specific emotions — ${EMOTION_LABELS.join(', ')}? Return every one that clearly applies (a question can name more than one real emotion for the same event), or an empty array if none do. Never force a mapping.`,
     )
   }
   // Topics are constrained to the user's own existing vocabulary rather
@@ -146,6 +146,13 @@ async function llmExtractFields(
  * own existing topic/entity vocabulary — never open generation) only runs
  * for whichever fields Layer 1 left unresolved, in a single call.
  *
+ * emotion is an array, not a single value: a question can genuinely name
+ * more than one real emotion for the same event ("proud but anxious"), and
+ * forcing a single pick would silently drop whichever one lost. Layer 1
+ * collects every distinct emotion whose keyword appears in the question,
+ * ordered by earliest occurrence in the text (not by definition order in
+ * EMOTION_SYNONYMS, which has no relationship to the question itself).
+ *
  * Deliberately no date field: "august" or "may" can be a month or a name,
  * and "yesterday" can be a date constraint or the actual topic of the
  * question ("times I reflected on yesterday") — that ambiguity isn't a
@@ -159,7 +166,7 @@ export async function extractQueryFilters(
   question: string,
   apiKey: string,
 ): Promise<QueryExtractionResult> {
-  const keywordEmotion = matchEmotionKeyword(question)
+  const keywordEmotions = matchEmotionKeywords(question)
 
   // A failure here must not take emotion's keyword match down with it — each
   // field resolves independently, so this degrades to "nothing matched"
@@ -174,7 +181,7 @@ export async function extractQueryFilters(
   }
 
   const need: FieldsNeeded = {
-    emotion: keywordEmotion === null,
+    emotion: keywordEmotions.length === 0,
     topics: vocabMatches.topics.length === 0,
     entities: vocabMatches.entities.length === 0,
   }
@@ -194,9 +201,9 @@ export async function extractQueryFilters(
 
   return {
     emotion:
-      keywordEmotion !== null
-        ? { value: keywordEmotion, resolvedBy: 'keyword' }
-        : { value: llmResult.emotion ?? null, resolvedBy: 'llm' },
+      keywordEmotions.length > 0
+        ? { value: keywordEmotions, resolvedBy: 'keyword' }
+        : { value: llmResult.emotion ?? [], resolvedBy: 'llm' },
     topics:
       vocabMatches.topics.length > 0
         ? { value: vocabMatches.topics, resolvedBy: 'keyword' }

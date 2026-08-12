@@ -88,7 +88,7 @@ export interface ExtractedField<T> {
 }
 
 export interface QueryExtractionResult {
-  emotion: ExtractedField<string | null>
+  emotion: ExtractedField<string[]>
   topics: ExtractedField<string[]>
   entities: ExtractedField<string[]>
 }

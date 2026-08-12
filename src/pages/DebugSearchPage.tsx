@@ -329,7 +329,7 @@ const RESOLVED_BY_STYLES: Record<'keyword' | 'llm', string> = {
 
 function ExtractedFiltersPanel({ extraction }: { extraction: QueryExtractionResult }) {
   const hasAnything =
-    extraction.emotion.value != null || extraction.topics.value.length > 0 || extraction.entities.value.length > 0
+    extraction.emotion.value.length > 0 || extraction.topics.value.length > 0 || extraction.entities.value.length > 0
 
   if (!hasAnything) {
     return (
@@ -343,14 +343,15 @@ function ExtractedFiltersPanel({ extraction }: { extraction: QueryExtractionResu
     <div className="mb-4 rounded-md border border-stone-200 bg-stone-50 px-4 py-3">
       <p className="mb-2 text-xs font-medium text-stone-600">Auto-extracted filters</p>
       <div className="flex flex-wrap items-center gap-1.5">
-        {extraction.emotion.value && (
+        {extraction.emotion.value.map((emotion) => (
           <span
+            key={`emotion-${emotion}`}
             className={`rounded-full px-2 py-0.5 text-xs font-medium ${RESOLVED_BY_STYLES[extraction.emotion.resolvedBy]}`}
             title={`resolved via ${extraction.emotion.resolvedBy}`}
           >
-            emotion: {extraction.emotion.value} · {extraction.emotion.resolvedBy}
+            emotion: {emotion} · {extraction.emotion.resolvedBy}
           </span>
-        )}
+        ))}
         {extraction.topics.value.map((topic) => (
           <span
             key={`topic-${topic}`}
