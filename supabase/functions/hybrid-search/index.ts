@@ -359,10 +359,24 @@ Deno.serve(async (req) => {
 
     // Rank by similarity when a query was involved (the more meaningful
     // relevance signal); fall back to recency for pure structured-filter
-    // searches, where there's no similarity signal at all.
+    // searches, where there's no similarity signal at all. A result can
+    // also end up with a null similarity even when a query was involved —
+    // score_chunks inner-joins to embeddings, so a matched chunk with
+    // chunk_metadata but no embeddings row would silently get no score.
+    // process-entry's normal insert order (embeddings, then chunk_metadata)
+    // doesn't actually produce that combination today, but nothing in the
+    // schema ties the two tables' existence together either, so it's not
+    // ruled out by anything besides current app behavior. Comparing those
+    // against scored results by recency instead — as opposed to always
+    // ranking them below every scored result — would make the comparator
+    // non-transitive (Array.sort's behavior is undefined without
+    // transitivity), so "has a score" always outranks "doesn't", and
+    // recency only breaks ties within each of those two groups.
     const results = [...merged.values()].sort((a, b) => {
-      if (a.similarity != null && b.similarity != null && a.similarity !== b.similarity) {
-        return b.similarity - a.similarity
+      if (a.similarity != null && b.similarity != null) {
+        if (a.similarity !== b.similarity) return b.similarity - a.similarity
+      } else if (a.similarity != null || b.similarity != null) {
+        return a.similarity != null ? -1 : 1
       }
       return new Date(b.entry_created_at).getTime() - new Date(a.entry_created_at).getTime()
     })
