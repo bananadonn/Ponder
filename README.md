@@ -174,7 +174,9 @@ No new secrets — reuses `OPENAI_API_KEY`.
 
 ## RAG pipeline — phase 7: automatic structured-filter extraction ("Prompt B")
 
-The structured side of `hybrid-search` no longer requires hand-picked filters — `emotion`/`topics`/`entities` are now inferred from the question itself (e.g. "what are times I was sad" → `emotion: sadness`), merged with whatever filters were also supplied manually. Each field resolves independently: a question can populate `topics` with no `emotion` match, or vice versa. `date_range` is part of the extraction output shape but isn't actually populated yet — no Layer 1/2 rule for dates has been built.
+The structured side of `hybrid-search` no longer requires hand-picked filters — `emotion`/`topics`/`entities` are now inferred from the question itself (e.g. "what are times I was sad" → `emotion: sadness`), merged with whatever filters were also supplied manually. Each field resolves independently: a question can populate `topics` with no `emotion` match, or vice versa.
+
+**Deliberately no date field.** Words like "august" or "may" can be a month or a name, and "yesterday" can be a date constraint or the literal topic of the question ("times I reflected on yesterday") — that's a genuine language ambiguity, not a parsing bug, so it can't be fixed by better inference. Date filtering is handled only by the explicit "From date"/"To date" controls on `/debug/search`: setting them narrows the *entire* merged result set (vector matches included) via a straightforward `created_at BETWEEN` check applied after vector and structured results are combined — it never participates in retrieval, scoring, or query extraction.
 
 **Two layers, keyword-first:**
 

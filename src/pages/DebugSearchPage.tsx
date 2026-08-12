@@ -327,28 +327,17 @@ const RESOLVED_BY_STYLES: Record<'keyword' | 'llm', string> = {
   llm: 'bg-violet-100 text-violet-700',
 }
 
-const MONTH_LABELS = [
-  'January', 'February', 'March', 'April', 'May', 'June',
-  'July', 'August', 'September', 'October', 'November', 'December',
-]
-
 function ExtractedFiltersPanel({ extraction }: { extraction: QueryExtractionResult }) {
   const hasAnything =
-    extraction.emotion.value != null ||
-    extraction.topics.value.length > 0 ||
-    extraction.entities.value.length > 0 ||
-    extraction.date_filter.value != null
+    extraction.emotion.value != null || extraction.topics.value.length > 0 || extraction.entities.value.length > 0
 
   if (!hasAnything) {
     return (
       <div className="mb-4 rounded-md border border-stone-200 bg-stone-50 px-4 py-3 text-xs text-stone-500">
-        Auto-extraction found no emotion, topics, entities, or date filter in this question.
+        Auto-extraction found no emotion, topics, or entities in this question.
       </div>
     )
   }
-
-  const dateFilter = extraction.date_filter
-  const otherMatches = dateFilter.allMatchedPatterns.filter((p) => p !== dateFilter.matchedPattern)
 
   return (
     <div className="mb-4 rounded-md border border-stone-200 bg-stone-50 px-4 py-3">
@@ -380,24 +369,6 @@ function ExtractedFiltersPanel({ extraction }: { extraction: QueryExtractionResu
             entity: {entity} · {extraction.entities.resolvedBy}
           </span>
         ))}
-        {dateFilter.value && (
-          <span
-            className="rounded-full bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-800"
-            title={`resolved via ${dateFilter.resolvedBy} · matched pattern: ${dateFilter.matchedPattern}${
-              otherMatches.length > 0
-                ? ` (largest of ${dateFilter.allMatchedPatterns.length} matches — also matched: ${otherMatches.join(', ')})`
-                : ''
-            }`}
-          >
-            date:{' '}
-            {dateFilter.value.type === 'recurring_month'
-              ? `every ${MONTH_LABELS[dateFilter.value.month - 1]}`
-              : `${new Date(dateFilter.value.start).toLocaleDateString()} – ${new Date(dateFilter.value.end).toLocaleDateString()}`}
-            {' · '}
-            {dateFilter.resolvedBy}
-            {otherMatches.length > 0 && ' ⚠'}
-          </span>
-        )}
       </div>
     </div>
   )

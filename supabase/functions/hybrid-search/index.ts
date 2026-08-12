@@ -8,7 +8,7 @@ import {
   type EmbeddingStrategy,
   type QueryEmbeddingInput,
 } from '../_shared/queryEmbeddingInput.ts'
-import { extractQueryFilters, type QueryExtractionResult, type SerializedDateFilter } from '../_shared/queryExtraction.ts'
+import { extractQueryFilters, type QueryExtractionResult } from '../_shared/queryExtraction.ts'
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!
 const ANON_KEY = Deno.env.get('SUPABASE_ANON_KEY')!
@@ -23,13 +23,14 @@ interface Filters {
   emotions?: string[]
   entities?: string[]
   topics?: string[]
+  // Explicit-UI-only: never inferred from question text. "august"/"may" can
+  // be a month or a name, and "yesterday" can be a date constraint or the
+  // actual topic of the question ("times I reflected on yesterday") — that
+  // ambiguity isn't fixable by better parsing, so date filtering only ever
+  // comes from a person setting it directly (see the date-range narrowing
+  // step in the main handler below).
   startDate?: string
   endDate?: string
-  // "Every May, any year" — mutually exclusive with startDate/endDate in
-  // practice (query extraction never sets both), but kept as its own field
-  // rather than folded into startDate/endDate since it's not a contiguous
-  // range. See DateFilter in dateExtraction.ts.
-  recurringMonth?: number
 }
 
 interface RequestBody {
@@ -68,8 +69,7 @@ function hasActiveFilters(filters?: Filters): boolean {
       (filters.entities && filters.entities.length > 0) ||
       (filters.topics && filters.topics.length > 0) ||
       filters.startDate ||
-      filters.endDate ||
-      filters.recurringMonth != null,
+      filters.endDate,
   )
 }
 
@@ -88,7 +88,6 @@ async function fetchFilterMatches(client: SupabaseClient, filters: Filters, matc
     filter_topics: filters.topics?.length ? filters.topics : null,
     filter_start: filters.startDate ?? null,
     filter_end: filters.endDate ?? null,
-    filter_recurring_month: filters.recurringMonth ?? null,
     match_count: matchCount,
   })
   if (error) throw error
@@ -143,29 +142,16 @@ interface FilterLegResult {
 // filter_chunks as soon as extraction (which runs concurrently with HyDE)
 // resolves.
 //
-// Manually-supplied filters are AND-combined in one filter_chunks call, as
-// before — that's deliberate intent when a person sets multiple filters on
-// purpose. Auto-extracted fields are NOT folded into that same AND'd call:
-// each independently-resolved field (emotion, topics, entities) gets its
-// own filter_chunks call, and the row sets are unioned. Extraction is a
+// Manually-supplied filters are AND-combined in one filter_chunks call —
+// that's deliberate intent when a person sets multiple filters on purpose.
+// Auto-extracted fields are NOT folded into that same AND'd call: each
+// independently-resolved field (emotion, topics, entities) gets its own
+// filter_chunks call, and the row sets are unioned. Extraction is a
 // fallible guess per field, not a deliberate joint constraint — a bad guess
 // on one field (e.g. a fabricated topic) must not veto a correct match on
 // another (e.g. a correctly keyword-matched emotion). Manual filters and
 // each extracted field can therefore surface a chunk independently; a chunk
 // matched by any one of them is included.
-//
-// date_filter is the one exception to that "independent OR" rule: it's
-// resolved deterministically (calendar-unit patterns, or chrono-node as a
-// fallback — see dateExtraction.ts), not guessed, so when it's extracted
-// alongside another field it's ANDed into that field's sub-query instead of
-// unioned in as its own unrestricted leg — see the comment above the
-// date_filter block below for why.
-function toDateFilterClause(dateFilter: SerializedDateFilter | null): Pick<Filters, 'startDate' | 'endDate' | 'recurringMonth'> {
-  if (!dateFilter) return {}
-  if (dateFilter.type === 'recurring_month') return { recurringMonth: dateFilter.month }
-  return { startDate: dateFilter.start, endDate: dateFilter.end }
-}
-
 async function runFilterLeg(
   client: SupabaseClient,
   manualFilters: Filters | undefined,
@@ -178,37 +164,14 @@ async function runFilterLeg(
   if (hasActiveFilters(manualFilters)) {
     subQueries.push(fetchFilterMatches(client, manualFilters!, filterLimit))
   }
-
-  const dateClause = toDateFilterClause(extraction?.date_filter.value ?? null)
-  const hasDateClause = Object.keys(dateClause).length > 0
-  const hasOtherExtractedField =
-    Boolean(extraction?.emotion.value) ||
-    Boolean(extraction && extraction.topics.value.length > 0) ||
-    Boolean(extraction && extraction.entities.value.length > 0)
-
-  // date_filter is deterministic (calendar-unit pattern match, or a
-  // chrono-node fallback), not a fuzzy guess like the fields below — so
-  // unlike them, it's safe to AND it into each other extracted field's
-  // sub-query rather than unioning it in as its own unrestricted leg. If it
-  // were unioned in unrestricted alongside e.g. an emotion sub-query, "sad
-  // entries last week" would resolve to (sad, any time) OR (any mood, last
-  // week) — silently dropping the "last week" restriction the question
-  // actually implied. Only when date_filter is the *sole* extracted field
-  // does it get its own standalone sub-query, so a pure date question
-  // ("what did I write last week") still surfaces results on date alone.
-  if (hasDateClause && !hasOtherExtractedField) {
-    subQueries.push(fetchFilterMatches(client, dateClause, filterLimit))
-  }
   if (extraction?.emotion.value) {
-    subQueries.push(
-      fetchFilterMatches(client, { emotions: [extraction.emotion.value], ...dateClause }, filterLimit),
-    )
+    subQueries.push(fetchFilterMatches(client, { emotions: [extraction.emotion.value] }, filterLimit))
   }
   if (extraction && extraction.topics.value.length > 0) {
-    subQueries.push(fetchFilterMatches(client, { topics: extraction.topics.value, ...dateClause }, filterLimit))
+    subQueries.push(fetchFilterMatches(client, { topics: extraction.topics.value }, filterLimit))
   }
   if (extraction && extraction.entities.value.length > 0) {
-    subQueries.push(fetchFilterMatches(client, { entities: extraction.entities.value, ...dateClause }, filterLimit))
+    subQueries.push(fetchFilterMatches(client, { entities: extraction.entities.value }, filterLimit))
   }
 
   if (subQueries.length === 0) {
@@ -263,22 +226,6 @@ async function logQuery(client: SupabaseClient, entry: QueryLogEntry): Promise<v
     emotion_resolved_by: entry.extraction?.emotion.resolvedBy ?? null,
     topics_resolved_by: entry.extraction?.topics.resolvedBy ?? null,
     entities_resolved_by: entry.extraction?.entities.resolvedBy ?? null,
-    // date_filter has no keyword/LLM choice like the fields above —
-    // resolvedBy here is 'calendar-unit' | 'chrono' | null instead, plus
-    // which pattern(s) matched. Logged so the "largest range wins when
-    // multiple calendar-unit patterns match" tradeoff (see
-    // dateExtraction.ts) can be spot-checked against real questions —
-    // matched_patterns having more than one entry is exactly that case.
-    extracted_date_filter_type: entry.extraction?.date_filter.value?.type ?? null,
-    extracted_date_range_start:
-      entry.extraction?.date_filter.value?.type === 'range' ? entry.extraction.date_filter.value.start : null,
-    extracted_date_range_end:
-      entry.extraction?.date_filter.value?.type === 'range' ? entry.extraction.date_filter.value.end : null,
-    extracted_date_recurring_month:
-      entry.extraction?.date_filter.value?.type === 'recurring_month' ? entry.extraction.date_filter.value.month : null,
-    date_resolved_by: entry.extraction?.date_filter.resolvedBy ?? null,
-    date_matched_pattern: entry.extraction?.date_filter.matchedPattern ?? null,
-    date_all_matched_patterns: entry.extraction?.date_filter.allMatchedPatterns ?? null,
   })
   if (error) throw error
 }
@@ -370,6 +317,23 @@ Deno.serve(async (req) => {
             source: 'structured',
           })
         }
+      }
+    }
+
+    // Explicit date range (UI-only — never inferred from `query`) narrows
+    // the *entire* merged set, vector-sourced rows included. This runs
+    // after vector/structured are merged, not as one more filter_chunks
+    // sub-query unioned in above, specifically so it also catches vector
+    // matches outside the window — those would otherwise leak through
+    // untouched by date entirely, since the vector leg has no date
+    // awareness of its own. It plays no part in retrieval or scoring; it's
+    // a pure post-filter.
+    if (body.filters?.startDate || body.filters?.endDate) {
+      const start = body.filters.startDate ? new Date(body.filters.startDate).getTime() : -Infinity
+      const end = body.filters.endDate ? new Date(body.filters.endDate).getTime() : Infinity
+      for (const [chunkId, row] of merged) {
+        const createdAt = new Date(row.entry_created_at).getTime()
+        if (createdAt < start || createdAt > end) merged.delete(chunkId)
       }
     }
 

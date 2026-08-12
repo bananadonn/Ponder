@@ -63,11 +63,11 @@ export interface HybridFilters {
   emotions?: string[]
   entities?: string[]
   topics?: string[]
+  // Explicit-UI-only — never inferred from question text (see
+  // supabase/functions/hybrid-search/index.ts). Narrows the whole merged
+  // result set (vector matches included), not just the structured leg.
   startDate?: string
   endDate?: string
-  // "Every May, any year" — see DateFilter in
-  // supabase/functions/_shared/dateExtraction.ts.
-  recurringMonth?: number
 }
 
 export interface SynthesisResult {
@@ -87,27 +87,8 @@ export interface ExtractedField<T> {
   resolvedBy: ResolvedBy
 }
 
-// Mirrors SerializedDateFilter/DateFilterField/DateResolvedBy in
-// supabase/functions/_shared/{queryExtraction,dateExtraction}.ts.
-// date_filter resolves via calendar-unit pattern matching (with the
-// largest-matching-range winning when several patterns match a question),
-// falling back to chrono-node parsing — never the keyword/LLM layers used
-// for the fields above, so it carries its own resolvedBy vocabulary and
-// pattern-match diagnostics instead of reusing ExtractedField/ResolvedBy.
-export type DateResolvedBy = 'calendar-unit' | 'chrono'
-
-export type SerializedDateFilter = { type: 'range'; start: string; end: string } | { type: 'recurring_month'; month: number }
-
-export interface DateFilterField {
-  value: SerializedDateFilter | null
-  resolvedBy: DateResolvedBy | null
-  matchedPattern: string | null
-  allMatchedPatterns: string[]
-}
-
 export interface QueryExtractionResult {
   emotion: ExtractedField<string | null>
   topics: ExtractedField<string[]>
   entities: ExtractedField<string[]>
-  date_filter: DateFilterField
 }

@@ -2,7 +2,6 @@ import type { SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2'
 import { EMOTION_LABELS, type EmotionLabel } from './emotionLabels.ts'
 import { matchEmotionKeyword } from './emotionSynonyms.ts'
 import { listKnownTopics, matchKnownVocab } from './vocabMatch.ts'
-import { extractDateFilter, type DateFilter, type DateResolvedBy } from './dateExtraction.ts'
 
 const EXTRACTION_MODEL = 'gpt-4o-mini'
 
@@ -13,27 +12,10 @@ export interface ExtractedField<T> {
   resolvedBy: ResolvedBy
 }
 
-// Wire-serializable form of DateFilter — Date objects become ISO strings
-// for the JSON response / query_log insert.
-export type SerializedDateFilter = { type: 'range'; start: string; end: string } | { type: 'recurring_month'; month: number }
-
-// Not an ExtractedField<T> like the fields below — date_filter is resolved
-// by a different mechanism (see dateExtraction.ts) with its own diagnostic
-// shape: resolvedBy is 'calendar-unit' | 'chrono' | null (no keyword/LLM
-// choice), plus which calendar-unit pattern(s) matched, kept for the
-// query_log spot-checks called for in dateExtraction.ts's docs.
-export interface DateFilterField {
-  value: SerializedDateFilter | null
-  resolvedBy: DateResolvedBy | null
-  matchedPattern: string | null
-  allMatchedPatterns: string[]
-}
-
 export interface QueryExtractionResult {
   emotion: ExtractedField<EmotionLabel | null>
   topics: ExtractedField<string[]>
   entities: ExtractedField<string[]>
-  date_filter: DateFilterField
 }
 
 interface LlmExtractionResult {
@@ -147,51 +129,30 @@ async function llmExtractFields(
   return JSON.parse(json.choices[0].message.content)
 }
 
-function serializeDateFilter(filter: DateFilter | null): SerializedDateFilter | null {
-  if (!filter) return null
-  if (filter.type === 'recurring_month') return filter
-  return { type: 'range', start: filter.start.toISOString(), end: filter.end.toISOString() }
-}
-
 /**
  * Query extraction ("Prompt B"): infers structured filters (emotion, topics,
- * entities, date_filter) from a natural-language question, so the
- * structured side of hybrid search doesn't require the user to hand-pick
- * filters. Each field resolves independently — Layer 1 (keyword/synonym
- * match for emotion, fuzzy known-vocab match for topics/entities) runs
- * first with no LLM call; Layer 2 (LLM, constrained to the closed emotion
- * vocabulary and the user's own existing topic vocabulary — never open
- * generation) only runs for whichever fields Layer 1 left unresolved, in a
- * single call. date_filter resolves via neither layer — see
- * dateExtraction.ts for its calendar-unit-pattern-then-chrono-fallback
- * approach.
+ * entities) from a natural-language question, so the structured side of
+ * hybrid search doesn't require the user to hand-pick filters. Each field
+ * resolves independently — Layer 1 (keyword/synonym match for emotion,
+ * fuzzy known-vocab match for topics/entities) runs first with no LLM call;
+ * Layer 2 (LLM, constrained to the closed emotion vocabulary and the user's
+ * own existing topic vocabulary — never open generation) only runs for
+ * whichever fields Layer 1 left unresolved, in a single call.
  *
- * `referenceDate` anchors date_filter's relative expressions ("yesterday",
- * "this month") — defaults to the real current time, overridable for tests.
+ * Deliberately no date field: "august" or "may" can be a month or a name,
+ * and "yesterday" can be a date constraint or the actual topic of the
+ * question ("times I reflected on yesterday") — that ambiguity isn't a
+ * parsing bug to fix, it's inherent to the language. Date filtering is
+ * handled entirely by an explicit UI control instead (see hybrid-search's
+ * request body / Filters.startDate-endDate), never inferred from question
+ * text.
  */
 export async function extractQueryFilters(
   client: SupabaseClient,
   question: string,
   apiKey: string,
-  referenceDate: Date = new Date(),
 ): Promise<QueryExtractionResult> {
   const keywordEmotion = matchEmotionKeyword(question)
-
-  // Independent of both layers below, and of everything an LLM does — a
-  // failure here must not take emotion/topics/entities resolution down with
-  // it, same reasoning as the vocab-match try/catch just below.
-  let dateFilter: DateFilterField = { value: null, resolvedBy: null, matchedPattern: null, allMatchedPatterns: [] }
-  try {
-    const result = extractDateFilter(question, referenceDate)
-    dateFilter = {
-      value: serializeDateFilter(result.filter),
-      resolvedBy: result.resolvedBy,
-      matchedPattern: result.matchedPattern,
-      allMatchedPatterns: result.allMatchedPatterns,
-    }
-  } catch (err) {
-    console.error('extractDateFilter failed; leaving date_filter unresolved', err)
-  }
 
   // A failure here must not take emotion's keyword match down with it — each
   // field resolves independently, so this degrades to "nothing matched"
@@ -237,6 +198,5 @@ export async function extractQueryFilters(
       vocabMatches.entities.length > 0
         ? { value: vocabMatches.entities, resolvedBy: 'keyword' }
         : { value: llmResult.entities ?? [], resolvedBy: 'llm' },
-    date_filter: dateFilter,
   }
 }
