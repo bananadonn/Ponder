@@ -164,8 +164,8 @@ async function runFilterLeg(
   if (hasActiveFilters(manualFilters)) {
     subQueries.push(fetchFilterMatches(client, manualFilters!, filterLimit))
   }
-  if (extraction?.emotion.value) {
-    subQueries.push(fetchFilterMatches(client, { emotions: [extraction.emotion.value] }, filterLimit))
+  if (extraction && extraction.emotion.value.length > 0) {
+    subQueries.push(fetchFilterMatches(client, { emotions: extraction.emotion.value }, filterLimit))
   }
   if (extraction && extraction.topics.value.length > 0) {
     subQueries.push(fetchFilterMatches(client, { topics: extraction.topics.value }, filterLimit))

@@ -25,15 +25,24 @@ const EMOTION_SYNONYMS: Record<string, EmotionLabel> = {
   disgusted: 'disgust', repulsed: 'disgust', gross: 'disgust',
 }
 
-export function matchEmotionKeyword(question: string): EmotionLabel | null {
+// Returns every distinct emotion the question mentions, ordered by where its
+// earliest keyword appears in the text — not by EMOTION_SYNONYMS' definition
+// order, which has no relationship to the question itself. A question can
+// genuinely name more than one real emotion for the same event ("proud but
+// anxious"), so this collects all of them rather than forcing a single pick.
+export function matchEmotionKeywords(question: string): EmotionLabel[] {
   const normalized = ` ${question
     .toLowerCase()
     .replace(/[^a-z0-9\s]/g, ' ')
     .replace(/\s+/g, ' ')
     .trim()} `
 
+  const matches: { label: EmotionLabel; index: number }[] = []
   for (const [keyword, label] of Object.entries(EMOTION_SYNONYMS)) {
-    if (normalized.includes(` ${keyword} `)) return label
+    const index = normalized.indexOf(` ${keyword} `)
+    if (index !== -1) matches.push({ label, index })
   }
-  return null
+  matches.sort((a, b) => a.index - b.index)
+
+  return [...new Set(matches.map((m) => m.label))]
 }
