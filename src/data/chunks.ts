@@ -5,7 +5,7 @@ export async function listChunksForEntry(entryId: string): Promise<Chunk[]> {
   const { data, error } = await supabase
     .from('chunks')
     .select(
-      'id, entry_id, chunk_index, text, created_at, embeddings(chunk_id), chunk_metadata(emotion, emotion_confidence, intensity, topics, entities)',
+      'id, entry_id, chunk_index, text, created_at, embeddings(chunk_id), chunk_metadata(emotion, emotion_confidence, secondary_emotion, secondary_emotion_confidence, intensity, topics, entities)',
     )
     .eq('entry_id', entryId)
     .order('chunk_index', { ascending: true })
