@@ -1,7 +1,7 @@
 import type { SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2'
 import { EMOTION_LABELS, type EmotionLabel } from './emotionLabels.ts'
 import { matchEmotionKeyword } from './emotionSynonyms.ts'
-import { listKnownTopics, matchKnownVocab } from './vocabMatch.ts'
+import { listKnownEntities, listKnownTopics, matchKnownVocab } from './vocabMatch.ts'
 
 const EXTRACTION_MODEL = 'gpt-4o-mini'
 
@@ -77,16 +77,23 @@ async function llmExtractFields(
       )
     }
   }
+  // Entities had the same open-generation risk topics was fixed for above —
+  // constrained to the user's own existing vocabulary for the same reason.
+  // If there's no known vocabulary yet, dropped from the request entirely,
+  // same as topics.
   if (need.entities) {
-    properties.entities = {
-      type: 'array',
-      items: { type: 'string' },
-      description: 'Proper nouns (people, places, organizations) explicitly named in the question. Empty array if none.',
+    const knownEntities = await listKnownEntities(client)
+    if (knownEntities.length > 0) {
+      properties.entities = {
+        type: 'array',
+        items: { type: 'string', enum: knownEntities },
+        description: 'Entities from the provided list that this question is about. Empty array if none fit.',
+      }
+      required.push('entities')
+      instructions.push(
+        `- entities: choose zero or more proper nouns (people, places, organizations) from this exact list that the question is about — do not invent new ones, only pick from what's given: ${knownEntities.join(', ')}. Return an empty array if none clearly fit. Never force a choice.`,
+      )
     }
-    required.push('entities')
-    instructions.push(
-      '- entities: proper nouns (people, places, organizations) explicitly named in the question. Empty array if none.',
-    )
   }
 
   // Nothing left to ask for — e.g. topics was the only requested field and
@@ -136,8 +143,8 @@ async function llmExtractFields(
  * resolves independently — Layer 1 (keyword/synonym match for emotion,
  * fuzzy known-vocab match for topics/entities) runs first with no LLM call;
  * Layer 2 (LLM, constrained to the closed emotion vocabulary and the user's
- * own existing topic vocabulary — never open generation) only runs for
- * whichever fields Layer 1 left unresolved, in a single call.
+ * own existing topic/entity vocabulary — never open generation) only runs
+ * for whichever fields Layer 1 left unresolved, in a single call.
  *
  * Deliberately no date field: "august" or "may" can be a month or a name,
  * and "yesterday" can be a date constraint or the actual topic of the

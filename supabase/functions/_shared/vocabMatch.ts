@@ -39,3 +39,12 @@ export async function listKnownTopics(client: SupabaseClient): Promise<string[]>
   if (error) throw error
   return (data ?? []).map((row: { topic: string }) => row.topic)
 }
+
+// Same fix as listKnownTopics, applied to entities: the LLM fallback picks
+// from this closed list instead of inventing entity names that match
+// nothing real.
+export async function listKnownEntities(client: SupabaseClient): Promise<string[]> {
+  const { data, error } = await client.rpc('list_known_entities')
+  if (error) throw error
+  return (data ?? []).map((row: { entity: string }) => row.entity)
+}
