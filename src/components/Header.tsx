@@ -9,7 +9,7 @@ export default function Header({ email }: { email: string | null | undefined }) 
       </Link>
       <div className="flex items-center gap-3">
         {email && <span className="text-sm text-stone-500">{email}</span>}
-        <button onClick={() => signOut()} className="text-sm text-stone-500 hover:text-stone-900">
+        <button onClick={() => signOut().catch(console.error)} className="text-sm text-stone-500 hover:text-stone-900">
           Sign out
         </button>
       </div>
