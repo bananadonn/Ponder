@@ -28,8 +28,14 @@ export default function App() {
       <Route path="/" element={<EntriesPage />} />
       <Route path="/entries/new" element={<EntryEditorPage />} />
       <Route path="/entries/:id" element={<EntryEditorPage />} />
-      <Route path="/debug/chunks" element={<DebugChunksPage />} />
-      <Route path="/debug/search" element={<DebugSearchPage />} />
+      {/* Developer/hand-checking tools (see README) — not part of the
+          product, so they're unreachable in production builds. */}
+      {import.meta.env.DEV && (
+        <>
+          <Route path="/debug/chunks" element={<DebugChunksPage />} />
+          <Route path="/debug/search" element={<DebugSearchPage />} />
+        </>
+      )}
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
   )
