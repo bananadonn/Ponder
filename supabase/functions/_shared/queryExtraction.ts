@@ -30,6 +30,32 @@ interface FieldsNeeded {
   entities: boolean
 }
 
+// Shared by the topics/entities blocks below — both are "pick zero or more
+// from this closed list" fields with the same shape, differing only in the
+// field name and how the instruction describes what's in the list. If
+// there's no known vocabulary yet (e.g. a brand-new user), the field is
+// dropped from the request entirely rather than asking the model to pick
+// from an empty list.
+function addKnownVocabField(
+  properties: Record<string, unknown>,
+  required: string[],
+  instructions: string[],
+  field: 'topics' | 'entities',
+  knownValues: string[],
+  itemLabel: string,
+): void {
+  if (knownValues.length === 0) return
+  properties[field] = {
+    type: 'array',
+    items: { type: 'string', enum: knownValues },
+    description: `${field === 'topics' ? 'Topics' : 'Entities'} from the provided list that this question is about. Empty array if none fit.`,
+  }
+  required.push(field)
+  instructions.push(
+    `- ${field}: choose zero or more ${itemLabel} from this exact list that the question is about — do not invent new ones, only pick from what's given: ${knownValues.join(', ')}. Return an empty array if none clearly fit. Never force a choice.`,
+  )
+}
+
 // Layer 2: only asks the LLM for whichever fields Layer 1 left unresolved —
 // if Layer 1 resolved everything, this is never called. Fields not needed
 // aren't included in the schema at all, rather than asked for and discarded,
@@ -55,45 +81,29 @@ async function llmExtractFields(
       `- emotion: does the question imply any of these specific emotions — ${EMOTION_LABELS.join(', ')}? Return every one that clearly applies (a question can name more than one real emotion for the same event), or an empty array if none do. Never force a mapping.`,
     )
   }
-  // Topics are constrained to the user's own existing vocabulary rather
-  // than freely generated — open generation previously let the model echo
-  // the question itself back as a "topic" (e.g. "sad moment" for the
-  // question "sad moment"), which then matched zero real chunks. Fetched
-  // only when topics are actually needed. If there's no known vocabulary
-  // yet (e.g. a brand-new user), there's nothing to choose from, so this
-  // field is dropped from the request entirely rather than asking the model
-  // to pick from an empty list.
+  // Topics and entities are both constrained to the user's own existing
+  // vocabulary rather than freely generated — open generation previously
+  // let the model echo the question itself back as a "topic" (e.g. "sad
+  // moment" for the question "sad moment") or invent an entity name,
+  // either of which then matched zero real chunks. The two known-vocab
+  // fetches are independent RPCs, so they run concurrently rather than one
+  // after the other when both fields are needed.
+  const [knownTopics, knownEntities] = await Promise.all([
+    need.topics ? listKnownTopics(client) : Promise.resolve<string[]>([]),
+    need.entities ? listKnownEntities(client) : Promise.resolve<string[]>([]),
+  ])
   if (need.topics) {
-    const knownTopics = await listKnownTopics(client)
-    if (knownTopics.length > 0) {
-      properties.topics = {
-        type: 'array',
-        items: { type: 'string', enum: knownTopics },
-        description: 'Topics from the provided list that this question is about. Empty array if none fit.',
-      }
-      required.push('topics')
-      instructions.push(
-        `- topics: choose zero or more topics from this exact list that the question is about — do not invent new ones, only pick from what's given: ${knownTopics.join(', ')}. Return an empty array if none clearly fit. Never force a choice.`,
-      )
-    }
+    addKnownVocabField(properties, required, instructions, 'topics', knownTopics, 'topics')
   }
-  // Entities had the same open-generation risk topics was fixed for above —
-  // constrained to the user's own existing vocabulary for the same reason.
-  // If there's no known vocabulary yet, dropped from the request entirely,
-  // same as topics.
   if (need.entities) {
-    const knownEntities = await listKnownEntities(client)
-    if (knownEntities.length > 0) {
-      properties.entities = {
-        type: 'array',
-        items: { type: 'string', enum: knownEntities },
-        description: 'Entities from the provided list that this question is about. Empty array if none fit.',
-      }
-      required.push('entities')
-      instructions.push(
-        `- entities: choose zero or more proper nouns (people, places, organizations) from this exact list that the question is about — do not invent new ones, only pick from what's given: ${knownEntities.join(', ')}. Return an empty array if none clearly fit. Never force a choice.`,
-      )
-    }
+    addKnownVocabField(
+      properties,
+      required,
+      instructions,
+      'entities',
+      knownEntities,
+      'proper nouns (people, places, organizations)',
+    )
   }
 
   // Nothing left to ask for — e.g. topics was the only requested field and
@@ -203,7 +213,10 @@ export async function extractQueryFilters(
     emotion:
       keywordEmotions.length > 0
         ? { value: keywordEmotions, resolvedBy: 'keyword' }
-        : { value: llmResult.emotion ?? [], resolvedBy: 'llm' },
+        // Deduped defensively, same as keywordEmotions (matchEmotionKeywords
+        // dedupes via Set) — the JSON schema's enum constrains each item to
+        // a valid label but doesn't guarantee the model won't repeat one.
+        : { value: [...new Set(llmResult.emotion ?? [])], resolvedBy: 'llm' },
     topics:
       vocabMatches.topics.length > 0
         ? { value: vocabMatches.topics, resolvedBy: 'keyword' }
