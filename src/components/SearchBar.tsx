@@ -9,8 +9,8 @@ export default function SearchBar({ value, onChange }: SearchBarProps) {
       type="search"
       value={value}
       onChange={(e) => onChange(e.target.value)}
-      placeholder="Search entries…"
-      className="w-full rounded-md border border-stone-300 px-3 py-2 text-sm focus:border-stone-500 focus:outline-none"
+      placeholder="Find entries…"
+      className="w-full rounded-soft border border-mist-200 bg-white px-3 py-2 text-sm text-mist-900 placeholder:text-mist-400 focus:border-mist-500 focus:outline-none focus:ring-2 focus:ring-mist-200"
     />
   )
 }
