@@ -1,7 +1,7 @@
 import { Navigate, Route, Routes } from 'react-router-dom'
 import { useAuth } from './hooks/useAuth'
 import LoginPage from './pages/LoginPage'
-import EntriesPage from './pages/EntriesPage'
+import MainLayout from './pages/MainLayout'
 import EntryEditorPage from './pages/EntryEditorPage'
 import DebugChunksPage from './pages/DebugChunksPage'
 import DebugSearchPage from './pages/DebugSearchPage'
@@ -11,7 +11,7 @@ export default function App() {
 
   if (loading) {
     return (
-      <div className="flex min-h-screen items-center justify-center text-sm text-stone-500">Loading…</div>
+      <div className="flex min-h-screen items-center justify-center text-sm text-mist-500">Loading…</div>
     )
   }
 
@@ -25,9 +25,10 @@ export default function App() {
 
   return (
     <Routes>
-      <Route path="/" element={<EntriesPage />} />
-      <Route path="/entries/new" element={<EntryEditorPage />} />
-      <Route path="/entries/:id" element={<EntryEditorPage />} />
+      <Route path="/" element={<MainLayout />}>
+        <Route index element={<EntryEditorPage />} />
+        <Route path="entries/:id" element={<EntryEditorPage />} />
+      </Route>
       {/* Developer/hand-checking tools (see README) — not part of the
           product, so they're unreachable in production builds. */}
       {import.meta.env.DEV && (
@@ -36,6 +37,7 @@ export default function App() {
           <Route path="/debug/search" element={<DebugSearchPage />} />
         </>
       )}
+      <Route path="/entries/new" element={<Navigate to="/" replace />} />
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
   )
