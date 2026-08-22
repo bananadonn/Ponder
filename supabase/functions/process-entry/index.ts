@@ -118,6 +118,107 @@ async function extractAllMetadata(texts: string[]): Promise<ExtractedMetadata[]>
   return Promise.all(texts.map(extractMetadata))
 }
 
+interface ReusableChunk {
+  vector: number[]
+  embeddingModel: string
+  embeddingVersion: string
+  metadata: ExtractedMetadata
+  extractionModel: string
+  extractionVersion: string
+}
+
+interface ExistingMetadataRow extends ExtractedMetadata {
+  chunk_id: string
+  extraction_model: string
+  extraction_version: string
+}
+
+interface ExistingEmbeddingRow {
+  chunk_id: string
+  vector: unknown
+  embedding_model: string
+  embedding_version: string
+}
+
+// pgvector columns can come back from PostgREST either as a real array or
+// as their text representation ("[0.1,0.2,...]", which happens to be valid
+// JSON) depending on client/driver version — handle both.
+function parseVector(v: unknown): number[] {
+  if (Array.isArray(v)) return v as number[]
+  if (typeof v === 'string') return JSON.parse(v)
+  throw new Error('Unexpected embedding vector format from DB')
+}
+
+// Most saves only change one paragraph out of many. Rather than re-embed
+// and re-tag every paragraph on every save, capture the embedding +
+// metadata of any existing chunk whose text is byte-for-byte unchanged (and
+// was computed with the current model/prompt versions — a version bump
+// still forces a full recompute, same as before this function existed) so
+// it can be reused instead of paying for a fresh OpenAI call.
+async function loadReusableChunks(entryId: string): Promise<Map<string, ReusableChunk[]>> {
+  const reuseByText = new Map<string, ReusableChunk[]>()
+
+  const { data: existingChunks } = await admin.from('chunks').select('id, text').eq('entry_id', entryId)
+  if (!existingChunks || existingChunks.length === 0) return reuseByText
+
+  const chunkIds = existingChunks.map(({ id }: { id: string }) => id)
+  const [{ data: existingEmbeddings }, { data: existingMetadata }] = await Promise.all([
+    admin
+      .from('embeddings')
+      .select('chunk_id, vector, embedding_model, embedding_version')
+      .in('chunk_id', chunkIds),
+    admin
+      .from('chunk_metadata')
+      .select(
+        'chunk_id, emotion, emotion_confidence, secondary_emotion, secondary_emotion_confidence, intensity, topics, entities, extraction_model, extraction_version',
+      )
+      .in('chunk_id', chunkIds),
+  ])
+
+  const embeddingByChunkId = new Map<string, ExistingEmbeddingRow>(
+    (existingEmbeddings ?? []).map((e: ExistingEmbeddingRow) => [e.chunk_id, e]),
+  )
+  const metadataByChunkId = new Map<string, ExistingMetadataRow>(
+    (existingMetadata ?? []).map((m: ExistingMetadataRow) => [m.chunk_id, m]),
+  )
+
+  for (const chunk of existingChunks as { id: string; text: string }[]) {
+    const embedding = embeddingByChunkId.get(chunk.id)
+    const metadata = metadataByChunkId.get(chunk.id)
+    if (
+      !embedding ||
+      !metadata ||
+      embedding.embedding_model !== EMBEDDING_MODEL ||
+      embedding.embedding_version !== EMBEDDING_VERSION ||
+      metadata.extraction_model !== EXTRACTION_MODEL ||
+      metadata.extraction_version !== EXTRACTION_VERSION
+    ) {
+      continue
+    }
+
+    const queue = reuseByText.get(chunk.text) ?? []
+    queue.push({
+      vector: parseVector(embedding.vector),
+      embeddingModel: embedding.embedding_model,
+      embeddingVersion: embedding.embedding_version,
+      metadata: {
+        emotion: metadata.emotion,
+        emotion_confidence: metadata.emotion_confidence,
+        secondary_emotion: metadata.secondary_emotion,
+        secondary_emotion_confidence: metadata.secondary_emotion_confidence,
+        intensity: metadata.intensity,
+        topics: metadata.topics,
+        entities: metadata.entities,
+      },
+      extractionModel: metadata.extraction_model,
+      extractionVersion: metadata.extraction_version,
+    })
+    reuseByText.set(chunk.text, queue)
+  }
+
+  return reuseByText
+}
+
 async function processEntry(entryId: string) {
   const { data: entry, error: fetchError } = await admin
     .from('entries')
@@ -137,10 +238,13 @@ async function processEntry(entryId: string) {
 
   await admin.from('entries').update({ processing_status: 'processing' }).eq('id', entryId)
 
+  const paragraphs = chunkContent(entry.content)
+
+  // Capture anything reusable from the current chunks before wiping them.
+  const reuseByText = await loadReusableChunks(entryId)
+
   // Reprocessing: clear any prior chunks (embeddings cascade with them).
   await admin.from('chunks').delete().eq('entry_id', entryId)
-
-  const paragraphs = chunkContent(entry.content)
 
   if (paragraphs.length === 0) {
     await admin.from('entries').update({ processing_status: 'complete' }).eq('id', entryId)
@@ -156,19 +260,78 @@ async function processEntry(entryId: string) {
     throw new Error(`Failed to insert chunks: ${insertChunksError?.message}`)
   }
 
+  // Reuse a matching existing chunk's embedding/metadata by exact text match
+  // (a queue per text, so duplicate paragraphs each get their own prior
+  // record); anything left over needs a fresh OpenAI call.
+  const reused = new Map<number, ReusableChunk>()
+  const freshIndexes: number[] = []
+  paragraphs.forEach((text, chunk_index) => {
+    const match = reuseByText.get(text)?.shift()
+    if (match) {
+      reused.set(chunk_index, match)
+    } else {
+      freshIndexes.push(chunk_index)
+    }
+  })
+
+  console.log(
+    `process-entry ${entryId}: ${freshIndexes.length} fresh, ${reused.size} reused of ${paragraphs.length} paragraphs`,
+  )
+
+  const freshTexts = freshIndexes.map((i) => paragraphs[i])
+
   // Embedding and metadata extraction are independent LLM calls over the
   // same chunks — run them concurrently rather than one after the other.
-  const [embeddingsByChunkIndex, metadataByChunkIndex] = await Promise.all([
-    embedTexts(paragraphs, OPENAI_API_KEY),
-    extractAllMetadata(paragraphs),
-  ])
+  // Skipped entirely when every paragraph was reused.
+  const [freshEmbeddings, freshMetadata] =
+    freshTexts.length > 0
+      ? await Promise.all([embedTexts(freshTexts, OPENAI_API_KEY), extractAllMetadata(freshTexts)])
+      : [[] as number[][], [] as ExtractedMetadata[]]
 
-  const embeddingRows = insertedChunks.map(({ id, chunk_index }: { id: string; chunk_index: number }) => ({
-    chunk_id: id,
-    vector: embeddingsByChunkIndex[chunk_index],
-    embedding_model: EMBEDDING_MODEL,
-    embedding_version: EMBEDDING_VERSION,
-  }))
+  const embeddingByChunkIndex = new Map<
+    number,
+    { vector: number[]; embedding_model: string; embedding_version: string }
+  >()
+  const metadataByChunkIndex = new Map<
+    number,
+    ExtractedMetadata & { extraction_model: string; extraction_version: string }
+  >()
+
+  freshIndexes.forEach((chunk_index, i) => {
+    embeddingByChunkIndex.set(chunk_index, {
+      vector: freshEmbeddings[i],
+      embedding_model: EMBEDDING_MODEL,
+      embedding_version: EMBEDDING_VERSION,
+    })
+    metadataByChunkIndex.set(chunk_index, {
+      ...freshMetadata[i],
+      extraction_model: EXTRACTION_MODEL,
+      extraction_version: EXTRACTION_VERSION,
+    })
+  })
+
+  for (const [chunk_index, r] of reused) {
+    embeddingByChunkIndex.set(chunk_index, {
+      vector: r.vector,
+      embedding_model: r.embeddingModel,
+      embedding_version: r.embeddingVersion,
+    })
+    metadataByChunkIndex.set(chunk_index, {
+      ...r.metadata,
+      extraction_model: r.extractionModel,
+      extraction_version: r.extractionVersion,
+    })
+  }
+
+  const embeddingRows = insertedChunks.map(({ id, chunk_index }: { id: string; chunk_index: number }) => {
+    const e = embeddingByChunkIndex.get(chunk_index)!
+    return {
+      chunk_id: id,
+      vector: e.vector,
+      embedding_model: e.embedding_model,
+      embedding_version: e.embedding_version,
+    }
+  })
 
   const { error: insertEmbeddingsError } = await admin.from('embeddings').insert(embeddingRows)
   if (insertEmbeddingsError) {
@@ -176,7 +339,7 @@ async function processEntry(entryId: string) {
   }
 
   const metadataRows = insertedChunks.map(({ id, chunk_index }: { id: string; chunk_index: number }) => {
-    const m = metadataByChunkIndex[chunk_index]
+    const m = metadataByChunkIndex.get(chunk_index)!
     return {
       chunk_id: id,
       emotion: m.emotion,
@@ -186,8 +349,8 @@ async function processEntry(entryId: string) {
       intensity: m.intensity,
       topics: m.topics,
       entities: m.entities,
-      extraction_model: EXTRACTION_MODEL,
-      extraction_version: EXTRACTION_VERSION,
+      extraction_model: m.extraction_model,
+      extraction_version: m.extraction_version,
     }
   })
 
