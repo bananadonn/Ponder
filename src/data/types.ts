@@ -1,9 +1,15 @@
+import type { JSONContent } from '@tiptap/core'
+
 export type ProcessingStatus = 'pending' | 'processing' | 'complete' | 'failed'
 
 export interface Entry {
   id: string
   user_id: string
   content: string
+  // Canonical rich-text document for the composer. Null for entries never
+  // opened in the rich editor (pre-migration rows) — `content` above is
+  // always the source of truth for search/chunking/previews regardless.
+  content_doc: JSONContent | null
   created_at: string
   updated_at: string
   metadata: Record<string, unknown>
@@ -11,10 +17,22 @@ export interface Entry {
 }
 
 export type NewEntry = Pick<Entry, 'content'> & {
+  content_doc?: Entry['content_doc']
   metadata?: Entry['metadata']
 }
 
-export type EntryUpdate = Partial<Pick<Entry, 'content' | 'metadata'>>
+export type EntryUpdate = Partial<Pick<Entry, 'content' | 'content_doc' | 'metadata'>>
+
+export interface Attachment {
+  id: string
+  entry_id: string
+  user_id: string
+  storage_path: string
+  filename: string
+  mime_type: string
+  size_bytes: number
+  created_at: string
+}
 
 export interface ChunkMetadata {
   emotion: string | null
