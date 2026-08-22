@@ -1,4 +1,5 @@
 import { supabase } from '../lib/supabase'
+import { deleteAttachmentsForEntry } from './attachments'
 import type { Entry, EntryUpdate, NewEntry } from './types'
 
 /**
@@ -65,6 +66,9 @@ export async function updateEntry(id: string, update: EntryUpdate): Promise<Entr
 }
 
 export async function deleteEntry(id: string): Promise<void> {
+  // Storage objects first: the DB cascade below only removes the
+  // `attachments` rows, never the actual files sitting in Storage.
+  await deleteAttachmentsForEntry(id)
   const { error } = await supabase.from('entries').delete().eq('id', id)
   if (error) throw error
 }

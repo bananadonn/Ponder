@@ -1,3 +1,13 @@
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+
+/* TipTap's Placeholder extension only marks the empty node (data-placeholder
+   attr + is-editor-empty class) — it ships no CSS of its own. */
+.ProseMirror p.is-editor-empty:first-child::before {
+  content: attr(data-placeholder);
+  float: left;
+  height: 0;
+  pointer-events: none;
+  @apply text-mist-400;
+}
