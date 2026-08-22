@@ -5,11 +5,21 @@ import { uploadAudioAttachment } from '../../data/attachments'
 // recording, stop() ends it and resolves with the captured Blob plus a
 // wall-clock duration (good enough for a voice note; not derived from audio
 // metadata parsing, which would be unnecessary work here).
+//
+// Alongside MediaRecorder (which only encodes -- it exposes no way to read
+// input level), start() also taps the same mic stream into a Web Audio
+// AnalyserNode purely for metering: getLevel() lets the UI poll "is this
+// actually picking up sound right now" while recording, independent of
+// whether the encoded recording turns out fine. The analyser is never
+// connected to audioContext.destination, so none of this plays audio back.
 export class AudioRecorder {
   private recorder: MediaRecorder | null = null
   private chunks: BlobPart[] = []
   private stream: MediaStream | null = null
   private startedAt = 0
+  private audioContext: AudioContext | null = null
+  private analyser: AnalyserNode | null = null
+  private levelData: Uint8Array<ArrayBuffer> | null = null
 
   async start(): Promise<void> {
     this.stream = await navigator.mediaDevices.getUserMedia({ audio: true })
@@ -20,6 +30,39 @@ export class AudioRecorder {
     }
     this.startedAt = Date.now()
     this.recorder.start()
+
+    this.audioContext = new AudioContext()
+    await this.audioContext.resume()
+    const source = this.audioContext.createMediaStreamSource(this.stream)
+    this.analyser = this.audioContext.createAnalyser()
+    this.analyser.fftSize = 256
+    source.connect(this.analyser)
+    this.levelData = new Uint8Array(new ArrayBuffer(this.analyser.frequencyBinCount))
+  }
+
+  // Instantaneous input level as 0 (silence) to 1 (loud), via RMS deviation
+  // from the analyser's midpoint sample value. Meant to be polled on an
+  // animation-frame cadence while recording, not stored/logged anywhere --
+  // this is UI feedback only, not part of what gets saved.
+  getLevel(): number {
+    if (!this.analyser || !this.levelData) return 0
+    this.analyser.getByteTimeDomainData(this.levelData)
+    let sumSquares = 0
+    for (const sample of this.levelData) {
+      const deviation = (sample - 128) / 128
+      sumSquares += deviation * deviation
+    }
+    const rms = Math.sqrt(sumSquares / this.levelData.length)
+    // RMS for typical speech rarely approaches 1 -- scale up so normal
+    // talking registers as a clearly visible level, not a barely-there one.
+    return Math.min(1, rms * 4)
+  }
+
+  private teardownAudioContext(): void {
+    this.audioContext?.close()
+    this.audioContext = null
+    this.analyser = null
+    this.levelData = null
   }
 
   stop(): Promise<{ blob: Blob; durationSeconds: number }> {
@@ -35,6 +78,7 @@ export class AudioRecorder {
         this.stream?.getTracks().forEach((track) => track.stop())
         this.stream = null
         this.recorder = null
+        this.teardownAudioContext()
         resolve({ blob, durationSeconds })
       }
       recorder.stop()
@@ -47,6 +91,7 @@ export class AudioRecorder {
     this.stream = null
     this.recorder = null
     this.chunks = []
+    this.teardownAudioContext()
   }
 }
 

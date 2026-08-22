@@ -94,6 +94,28 @@ function StopIcon() {
   )
 }
 
+// Live "is this actually picking up my voice" feedback while recording --
+// bar heights are a fixed function of the current mic level (see
+// AudioRecorder.getLevel), weighted to look like a little waveform rather
+// than one flat bar. Bars stay near their floor height in silence and
+// visibly move as soon as there's sound, which is the signal itself --
+// no separate "no sound detected" state to keep in sync with it.
+const MIC_METER_WEIGHTS = [0.45, 0.7, 1, 0.7, 0.45]
+
+function MicLevelMeter({ level }: { level: number }) {
+  return (
+    <span className="flex h-4 items-center gap-[2px]" aria-hidden="true">
+      {MIC_METER_WEIGHTS.map((weight, i) => (
+        <span
+          key={i}
+          className="w-[2px] rounded-full bg-red-500 transition-[height] duration-75 ease-out"
+          style={{ height: `${3 + level * 11 * weight}px` }}
+        />
+      ))}
+    </span>
+  )
+}
+
 export default function EntryEditorPage() {
   const { id } = useParams<{ id: string }>()
   const { onSaved, refresh, showList } = useOutletContext<ComposerContext>()
@@ -110,6 +132,7 @@ export default function EntryEditorPage() {
   const [error, setError] = useState<string | null>(null)
   const [charCount, setCharCount] = useState(0)
   const [recording, setRecording] = useState(false)
+  const [micLevel, setMicLevel] = useState(0)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const recorderRef = useRef<AudioRecorder | null>(null)
 
@@ -285,6 +308,26 @@ export default function EntryEditorPage() {
       recorderRef.current?.cancel()
     }
   }, [])
+
+  // Polls AudioRecorder.getLevel() on an animation-frame cadence while
+  // recording so MicLevelMeter has something live to render -- this is the
+  // "am I actually being heard" feedback loop. Tied to `recording` state
+  // rather than started/stopped inline in handleToggleRecording so it can't
+  // drift out of sync with it (e.g. an error path that flips `recording`
+  // back to false without going through the stop button).
+  useEffect(() => {
+    if (!recording) {
+      setMicLevel(0)
+      return
+    }
+    let frame: number
+    const tick = () => {
+      setMicLevel(recorderRef.current?.getLevel() ?? 0)
+      frame = requestAnimationFrame(tick)
+    }
+    frame = requestAnimationFrame(tick)
+    return () => cancelAnimationFrame(frame)
+  }, [recording])
 
   const editor = useEntryEditor({ onUpdate: handleEditorUpdate, onImageFiles: handleImageFiles })
   editorRef.current = editor
@@ -483,6 +526,7 @@ export default function EntryEditorPage() {
             >
               {recording ? <StopIcon /> : <MicIcon />}
               {recording ? 'Stop recording' : 'Record voice'}
+              {recording && <MicLevelMeter level={micLevel} />}
             </button>
           </div>
           <p className="text-xs text-mist-400">
