@@ -23,6 +23,8 @@ export type NewEntry = Pick<Entry, 'content'> & {
 
 export type EntryUpdate = Partial<Pick<Entry, 'content' | 'content_doc' | 'metadata'>>
 
+export type TranscriptionStatus = 'pending' | 'processing' | 'complete' | 'failed'
+
 export interface Attachment {
   id: string
   entry_id: string
@@ -32,6 +34,10 @@ export interface Attachment {
   mime_type: string
   size_bytes: number
   created_at: string
+  // Audio only. Image rows stay at the 'complete' default with null transcript/duration.
+  transcript: string | null
+  transcription_status: TranscriptionStatus
+  duration_seconds: number | null
 }
 
 export interface ChunkMetadata {

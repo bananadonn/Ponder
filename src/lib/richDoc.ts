@@ -22,6 +22,17 @@ export const EMPTY_DOC: JSONContent = { type: 'doc', content: [{ type: 'paragrap
 // An image node leaves a small textual trace ([image: filename]) so search
 // and topic/entity extraction have some awareness it was there, without any
 // actual image analysis.
+//
+// An audio node contributes its transcript verbatim once transcription (a
+// background job, see supabase/functions/transcribe-audio) has filled it
+// in -- that's what makes a voice note searchable/embeddable via the normal
+// chunking pipeline while the composer itself only ever renders a player,
+// never this text. Before transcription lands (or if it fails), a
+// placeholder stands in so the entry still saves and processes cleanly.
+// A server-side port of this function (supabase/functions/_shared/richDocPlainText.ts)
+// must stay in sync with this node-type handling -- it's what performs the
+// write-back once a transcript is ready, since the Edge Function can't
+// import this browser module directly.
 export function docToPlainText(doc: JSONContent): string {
   const paragraphs = doc.content ?? []
   return paragraphs
@@ -32,6 +43,7 @@ export function docToPlainText(doc: JSONContent): string {
           if (node.type === 'text') return node.text ?? ''
           if (node.type === 'hardBreak') return '\n'
           if (node.type === 'image') return `[image: ${node.attrs?.filename ?? 'image'}]`
+          if (node.type === 'audio') return node.attrs?.transcript || '[voice note]'
           return ''
         })
         .join('')

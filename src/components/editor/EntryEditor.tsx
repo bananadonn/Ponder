@@ -8,6 +8,7 @@ import HardBreak from '@tiptap/extension-hard-break'
 import History from '@tiptap/extension-history'
 import Placeholder from '@tiptap/extension-placeholder'
 import ImageNode from './ImageNode'
+import AudioNode from './AudioNode'
 import TagHighlightExtension from './TagHighlightExtension'
 import PasteImageExtension from './PasteImageExtension'
 import { EMPTY_DOC } from '../../lib/richDoc'
@@ -43,6 +44,7 @@ export function useEntryEditor({ onUpdate, onImageFiles }: UseEntryEditorOptions
           placeholder: 'Write… #topic and @entity are picked up automatically',
         }),
         ImageNode,
+        AudioNode,
         TagHighlightExtension,
         PasteImageExtension.configure({
           onImageFiles: (files) => onImageFilesRef.current(files),
