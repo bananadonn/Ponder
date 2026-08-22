@@ -1,24 +1,11 @@
 import { useEffect, useState } from 'react'
-import { Link, Outlet, useNavigate, useParams } from 'react-router-dom'
+import { Outlet, useNavigate, useParams } from 'react-router-dom'
 import Header from '../components/Header'
 import SearchBar from '../components/SearchBar'
 import EntryListItem from '../components/EntryListItem'
+import ReflectPanel from '../components/ReflectPanel'
 import { useAuth } from '../hooks/useAuth'
 import { useEntries } from '../hooks/useEntries'
-
-function CompassIcon() {
-  return (
-    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-      <circle cx="12" cy="12" r="8.5" stroke="currentColor" strokeWidth="1.5" />
-      <path
-        d="m14.5 9.5-1.8 4.2a1 1 0 0 1-.52.52L8 16l1.8-4.2a1 1 0 0 1 .52-.52L14.5 9.5Z"
-        stroke="currentColor"
-        strokeWidth="1.5"
-        strokeLinejoin="round"
-      />
-    </svg>
-  )
-}
 
 function PlusIcon() {
   return (
@@ -51,7 +38,7 @@ export default function MainLayout() {
   // On mobile only one pane shows at a time. Land on the composer straight
   // away for a brand-new journal (nothing to browse yet); otherwise land on
   // the list so a returning visitor sees their entries first.
-  const [mobileView, setMobileView] = useState<'list' | 'composer'>('list')
+  const [mobileView, setMobileView] = useState<'list' | 'composer' | 'reflect'>('list')
   useEffect(() => {
     if (!loading && entries.length === 0 && !id) setMobileView('composer')
   }, [loading, entries.length, id])
@@ -75,7 +62,7 @@ export default function MainLayout() {
 
   return (
     <div className="flex h-screen flex-col bg-mist-50">
-      <Header email={user?.email} />
+      <Header email={user?.email} onReflect={() => setMobileView('reflect')} />
 
       <div className="flex min-h-0 flex-1">
         <div
@@ -94,14 +81,6 @@ export default function MainLayout() {
               <PlusIcon />
             </button>
           </div>
-
-          <Link
-            to="/debug/search"
-            className="flex items-center gap-2 border-b border-mist-200 px-4 py-3 text-sm font-medium text-mist-700 transition-colors hover:bg-mist-100 hover:text-mist-900"
-          >
-            <CompassIcon />
-            Reflect
-          </Link>
 
           <div className="flex-1 overflow-y-auto px-2.5 py-2.5">
             {loading && <p className="px-1.5 py-2 text-sm text-mist-500">Loading…</p>}
@@ -123,6 +102,14 @@ export default function MainLayout() {
 
         <div className={`${mobileView === 'composer' ? 'flex' : 'hidden'} min-w-0 flex-1 flex-col md:flex`}>
           <Outlet context={context} />
+        </div>
+
+        <div
+          className={`${
+            mobileView === 'reflect' ? 'flex' : 'hidden'
+          } w-full shrink-0 flex-col border-l border-mist-200 bg-mist-50 md:flex md:w-[320px]`}
+        >
+          <ReflectPanel onOpenEntry={openEntry} onBack={() => setMobileView('list')} />
         </div>
       </div>
     </div>
