@@ -6,6 +6,7 @@ import { docToPlainText, EMPTY_DOC, joinContent, plainTextToDoc, splitContent } 
 import { extractHandTags } from '../lib/tags'
 import { useEntryEditor, EntryEditorContent } from '../components/editor/EntryEditor'
 import { insertImageAtSelection } from '../components/editor/uploadImage'
+import { AudioRecorder, insertAudioAtSelection } from '../components/editor/recordAudio'
 import type { ComposerContext } from './MainLayout'
 
 const MAX_CHARS = 40000
@@ -70,6 +71,29 @@ function AttachIcon() {
   )
 }
 
+function MicIcon() {
+  return (
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <rect x="9" y="2" width="6" height="12" rx="3" stroke="currentColor" strokeWidth="1.6" />
+      <path
+        d="M5 11a7 7 0 0 0 14 0M12 18v4"
+        stroke="currentColor"
+        strokeWidth="1.6"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  )
+}
+
+function StopIcon() {
+  return (
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <rect x="5" y="5" width="14" height="14" rx="2" fill="currentColor" />
+    </svg>
+  )
+}
+
 export default function EntryEditorPage() {
   const { id } = useParams<{ id: string }>()
   const { onSaved, refresh, showList } = useOutletContext<ComposerContext>()
@@ -85,7 +109,9 @@ export default function EntryEditorPage() {
   const [status, setStatus] = useState<'idle' | 'unsaved' | 'saving' | 'saved' | 'error'>('idle')
   const [error, setError] = useState<string | null>(null)
   const [charCount, setCharCount] = useState(0)
+  const [recording, setRecording] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
+  const recorderRef = useRef<AudioRecorder | null>(null)
 
   // Save machinery lives in refs so it survives renders without re-running
   // effects, and so the flush-on-navigate path below always sees the latest
@@ -221,6 +247,44 @@ export default function EntryEditorPage() {
       }
     }
   }
+
+  async function handleToggleRecording() {
+    if (recording) {
+      setRecording(false)
+      const recorder = recorderRef.current
+      recorderRef.current = null
+      if (!recorder) return
+      try {
+        const { blob, durationSeconds } = await recorder.stop()
+        const editorInstance = editorRef.current
+        if (!editorInstance) return
+        const entryId = await createEntryNow()
+        await insertAudioAtSelection(editorInstance, blob, durationSeconds, entryId)
+      } catch (err) {
+        setError(err instanceof Error ? err.message : 'Failed to save recording')
+      }
+      return
+    }
+
+    try {
+      const recorder = new AudioRecorder()
+      await recorder.start()
+      recorderRef.current = recorder
+      setRecording(true)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Microphone access was denied')
+    }
+  }
+
+  // If the user navigates away mid-recording, stop the mic rather than
+  // leaving the track (and its "recording" indicator) running in the
+  // background -- the in-progress audio is discarded, same as any other
+  // unsaved-in-the-editor-but-never-committed input.
+  useEffect(() => {
+    return () => {
+      recorderRef.current?.cancel()
+    }
+  }, [])
 
   const editor = useEntryEditor({ onUpdate: handleEditorUpdate, onImageFiles: handleImageFiles })
   editorRef.current = editor
@@ -393,7 +457,7 @@ export default function EntryEditorPage() {
         </div>
 
         <div className="mt-6 flex items-center justify-between border-t border-mist-200 pt-3">
-          <div>
+          <div className="flex items-center gap-1">
             <input
               ref={fileInputRef}
               type="file"
@@ -409,6 +473,16 @@ export default function EntryEditorPage() {
             >
               <AttachIcon />
               Attach image
+            </button>
+            <button
+              type="button"
+              onClick={handleToggleRecording}
+              className={`flex items-center gap-1.5 rounded-soft px-1.5 py-1 text-xs font-medium transition-colors ${
+                recording ? 'text-red-600 hover:bg-red-50' : 'text-mist-500 hover:bg-mist-100 hover:text-mist-900'
+              }`}
+            >
+              {recording ? <StopIcon /> : <MicIcon />}
+              {recording ? 'Stop recording' : 'Record voice'}
             </button>
           </div>
           <p className="text-xs text-mist-400">

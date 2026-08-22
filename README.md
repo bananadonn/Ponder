@@ -203,3 +203,32 @@ No new secrets — reuses `OPENAI_API_KEY`.
 ### Trying it out
 
 `/debug/search` has an "Auto-extract from question" checkbox in the structured filters panel (on by default — uncheck it to test manually-picked filters in isolation, the old phase-4 behavior). When extraction finds anything, a panel above the results shows each field's value and whether it came from the keyword layer or the LLM fallback.
+
+## Voice recording + background transcription
+
+Entries can now carry inline voice notes alongside images ("Record voice" next to "Attach image" in the composer). A recording saves as a real `<audio>` element — the composer never displays its content as text — but a background job transcribes it and folds the transcript into the entry's plain text, so it flows through the *existing* chunking/embedding/tagging pipeline exactly like typed text, and becomes searchable via `/debug/search` the same way.
+
+**Deliberately adds exactly one new AI call, and no new pipeline logic.** Transcription uses `whisper-1` (a dedicated ASR model, not a chat/completion model) at `temperature: 0` — the cheapest OpenAI transcription option and about as deterministic as this gets. The raw transcript is inserted verbatim as a single paragraph: no LLM cleans up punctuation, summarizes, or decides how to split a recording into multiple paragraphs. Everything downstream (emotion/topic/entity extraction, embedding) is the same `process-entry` pipeline every other paragraph already goes through, unmodified — and its existing exact-text-match reuse cache (`loadReusableChunks`) means only the new transcript paragraph triggers a fresh OpenAI call when the write-back below lands; every other unchanged paragraph in the entry is reused for free, same as any other edit-and-resave.
+
+**How the transcript gets from audio into searchable text without ever showing up in the composer:** the audio node's `transcript` attribute is real data on the rich-doc node (`src/components/editor/AudioNode.ts`) but `AudioNodeView` never renders it — only a player. `docToPlainText` (`src/lib/richDoc.ts`) does read it, the same way it reads an image node's filename, so once transcription lands the transcript becomes part of `entries.content` and gets chunked normally. Before transcription finishes (or if it fails), a `[voice note]` placeholder stands in so the entry still saves and processes cleanly.
+
+**The write-back is what re-triggers processing, not a direct function call.** `transcribe-audio` patches the entry's `content_doc`/`content` once a transcript is ready, and that update hits the same columns the `entries` webhook already watches for `process-entry` — so the existing webhook fires it, same as any other content edit. `supabase/functions/_shared/richDocPlainText.ts` is a small Deno port of `docToPlainText`/`splitContent`/`joinContent` for this purpose, since the Edge Function can't import the browser module directly; it needs to stay hand-in-sync with `src/lib/richDoc.ts` if a new inline node type is ever added.
+
+### Setup
+
+1. Run `supabase/migrations/0017_audio_attachments.sql` (adds `transcript`/`transcription_status`/`duration_seconds` to `attachments`, and the private `entry-audio` storage bucket + RLS, mirroring `0016_attachments.sql`).
+2. Deploy the new function (`process-entry` itself is untouched — it doesn't reference the new `TRANSCRIPTION_MODEL`/`transcribeAudio` exports added to `_shared/openai.ts`, so it doesn't need redeploying):
+
+   ```
+   supabase functions deploy transcribe-audio
+   ```
+
+3. Supabase dashboard → Database → Webhooks → new webhook:
+   - Table: `attachments`
+   - Events: `INSERT`
+   - Type: HTTP request → your deployed `transcribe-audio` function URL
+   - Headers: `Authorization: Bearer <service role key>` — same pattern as the `entries` → `process-entry` webhook. Unlike `process-entry`, this function only ever accepts the service-role token; it's never called from the browser, so there's no per-caller ownership check to fall back to.
+
+   (Under the hood this is just a Postgres trigger calling `supabase_functions.http_request(...)` — same mechanism the dashboard UI sets up for the `entries` webhook, so if you'd rather script it than click through the dashboard, mirror that trigger's definition for `attachments`/`INSERT` instead.)
+
+No new secrets — reuses `OPENAI_API_KEY`. Image attachments are untouched by any of this (`transcription_status` defaults to `'complete'` on insert so existing image rows and the image-upload path are unaffected).
