@@ -1,5 +1,6 @@
 import type { Session } from '@supabase/supabase-js'
 import { supabase } from '../lib/supabase'
+import { clearSessionDek } from '../lib/sessionKey'
 
 /**
  * Framework-agnostic auth functions, shared with mobile/desktop clients later.
@@ -15,6 +16,7 @@ export async function signInWithMagicLink(email: string): Promise<void> {
 
 export async function signOut(): Promise<void> {
   const { error } = await supabase.auth.signOut()
+  clearSessionDek()
   if (error) throw error
 }
 

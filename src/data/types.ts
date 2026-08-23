@@ -118,3 +118,26 @@ export interface QueryExtractionResult {
   topics: ExtractedField<string[]>
   entities: ExtractedField<string[]>
 }
+
+// Reflection mode (supabase/functions/reflect). A session-only conversation —
+// never persisted — so `history` is just what the client already has in
+// memory, sent back on each turn.
+export interface HistoryTurn {
+  role: 'user' | 'assistant'
+  content: string
+}
+
+export interface ReflectCitation {
+  // Position of the matching `[n]` marker inside `answer` — not an array
+  // index, since a citation can be dropped by the server's integrity check.
+  index: number
+  chunk_id: string
+  entry_id: string
+  entry_created_at: string
+}
+
+export interface ReflectResponse {
+  answer: string
+  grounded: boolean
+  citations: ReflectCitation[]
+}

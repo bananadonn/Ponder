@@ -1,26 +1,14 @@
-import { useEffect, useState } from 'react'
 import { NodeViewWrapper, type NodeViewProps } from '@tiptap/react'
-import { getSignedUrlCached } from '../../data/attachments'
+import { IMAGE_BUCKET } from '../../data/attachments'
+import { useDecryptedAttachmentUrl } from '../../hooks/useDecryptedAttachmentUrl'
 
 export default function ImageNodeView({ node }: NodeViewProps) {
-  const { status, localBlobUrl, storagePath, filename } = node.attrs
-  const [signedUrl, setSignedUrl] = useState<string | null>(null)
-  const [resolveFailed, setResolveFailed] = useState(false)
-
-  useEffect(() => {
-    if (status !== 'ready' || !storagePath) return
-    let cancelled = false
-    getSignedUrlCached(storagePath)
-      .then((url) => {
-        if (!cancelled) setSignedUrl(url)
-      })
-      .catch(() => {
-        if (!cancelled) setResolveFailed(true)
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [status, storagePath])
+  const { status, localBlobUrl, storagePath, filename, mimeType } = node.attrs
+  const { url: decryptedUrl, failed: resolveFailed } = useDecryptedAttachmentUrl(
+    status === 'ready' ? storagePath : null,
+    IMAGE_BUCKET,
+    mimeType,
+  )
 
   if (status === 'error' || resolveFailed) {
     return (
@@ -33,7 +21,7 @@ export default function ImageNodeView({ node }: NodeViewProps) {
     )
   }
 
-  const src = status === 'uploading' ? localBlobUrl : signedUrl
+  const src = status === 'uploading' ? localBlobUrl : decryptedUrl
 
   return (
     <NodeViewWrapper as="span" className="inline-block align-middle">

@@ -1,4 +1,6 @@
 import { supabase } from '../lib/supabase'
+import { decryptOrPassthrough } from '../lib/crypto'
+import { getSessionDek } from '../lib/sessionKey'
 import type { Chunk } from './types'
 
 export async function listChunksForEntry(entryId: string): Promise<Chunk[]> {
@@ -12,17 +14,21 @@ export async function listChunksForEntry(entryId: string): Promise<Chunk[]> {
 
   if (error) throw error
 
-  return data.map((row) => {
-    const metadata = Array.isArray(row.chunk_metadata) ? row.chunk_metadata[0] : row.chunk_metadata
+  const dek = await getSessionDek()
 
-    return {
-      id: row.id,
-      entry_id: row.entry_id,
-      chunk_index: row.chunk_index,
-      text: row.text,
-      created_at: row.created_at,
-      has_embedding: Array.isArray(row.embeddings) && row.embeddings.length > 0,
-      metadata: metadata ?? null,
-    }
-  })
+  return Promise.all(
+    data.map(async (row) => {
+      const metadata = Array.isArray(row.chunk_metadata) ? row.chunk_metadata[0] : row.chunk_metadata
+
+      return {
+        id: row.id,
+        entry_id: row.entry_id,
+        chunk_index: row.chunk_index,
+        text: (await decryptOrPassthrough(dek, row.text))!,
+        created_at: row.created_at,
+        has_embedding: Array.isArray(row.embeddings) && row.embeddings.length > 0,
+        metadata: metadata ?? null,
+      }
+    }),
+  )
 }

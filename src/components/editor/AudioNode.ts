@@ -20,6 +20,7 @@ declare module '@tiptap/core' {
           status: AudioStatus
           attachmentId: string
           storagePath: string
+          mimeType: string
         }>,
       ) => ReturnType
     }
@@ -42,6 +43,7 @@ const AudioNode = Node.create({
       attachmentId: { default: null },
       storagePath: { default: null },
       filename: { default: 'voice note' },
+      mimeType: { default: null },
       status: { default: 'ready' },
       localBlobUrl: { default: null },
       tempId: { default: null },

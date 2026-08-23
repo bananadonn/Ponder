@@ -19,6 +19,7 @@ declare module '@tiptap/core' {
           status: ImageStatus
           attachmentId: string
           storagePath: string
+          mimeType: string
         }>,
       ) => ReturnType
     }
@@ -36,6 +37,7 @@ const ImageNode = Node.create({
       attachmentId: { default: null },
       storagePath: { default: null },
       filename: { default: 'image' },
+      mimeType: { default: null },
       status: { default: 'ready' },
       localBlobUrl: { default: null },
       tempId: { default: null },

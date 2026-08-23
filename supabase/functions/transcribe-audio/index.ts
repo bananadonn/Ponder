@@ -2,18 +2,22 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
 import { corsHeaders } from '../_shared/cors.ts'
 import { transcribeAudio } from '../_shared/openai.ts'
 import { joinContent, richDocPlainText, setAudioTranscript, splitContentTitle } from '../_shared/richDocPlainText.ts'
+import { base64ToBytes, decryptBytes, decryptOrPassthrough, encrypt, getUserDek, importAesKey } from '../_shared/crypto.ts'
 
 const AUDIO_BUCKET = 'entry-audio'
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!
 const SERVICE_ROLE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!
 const OPENAI_API_KEY = Deno.env.get('OPENAI_API_KEY')!
+const ENCRYPTION_MASTER_KEY = Deno.env.get('ENCRYPTION_MASTER_KEY')!
 
 const admin = createClient(SUPABASE_URL, SERVICE_ROLE_KEY)
+const masterKeyPromise = importAesKey(base64ToBytes(ENCRYPTION_MASTER_KEY), false)
 
 interface AttachmentRecord {
   id: string
   entry_id: string
+  user_id: string
   storage_path: string
   filename: string
   mime_type: string
@@ -25,7 +29,12 @@ interface AttachmentRecord {
 // for the new paragraph -- no direct call to process-entry needed, and
 // loadReusableChunks in process-entry ensures every other unchanged
 // paragraph in the entry is reused rather than re-billed.
-async function writeTranscriptToEntry(entryId: string, attachmentId: string, transcript: string): Promise<void> {
+async function writeTranscriptToEntry(
+  entryId: string,
+  attachmentId: string,
+  transcript: string,
+  dek: CryptoKey,
+): Promise<void> {
   const { data: entry, error } = await admin
     .from('entries')
     .select('id, content, content_doc')
@@ -34,14 +43,16 @@ async function writeTranscriptToEntry(entryId: string, attachmentId: string, tra
   if (error || !entry) {
     throw new Error(`Entry not found for transcript write-back: ${entryId}`)
   }
-  if (!entry.content_doc) {
+  const decryptedDocText = await decryptOrPassthrough(dek, entry.content_doc)
+  if (!decryptedDocText) {
     // No rich doc to patch (legacy plain-text entry) -- nothing to do. This
     // shouldn't happen in practice since only the rich editor can insert an
     // audio node in the first place.
     return
   }
+  const contentDoc = JSON.parse(decryptedDocText)
 
-  const patchedDoc = setAudioTranscript(entry.content_doc, attachmentId, transcript)
+  const patchedDoc = setAudioTranscript(contentDoc, attachmentId, transcript)
   if (!patchedDoc) {
     // The audio node is no longer present in content_doc -- e.g. the user
     // deleted it from the entry before transcription finished. Nothing to
@@ -49,12 +60,17 @@ async function writeTranscriptToEntry(entryId: string, attachmentId: string, tra
     return
   }
 
-  const title = splitContentTitle(entry.content)
+  const plainContent = (await decryptOrPassthrough(dek, entry.content))!
+  const title = splitContentTitle(plainContent)
   const newContent = joinContent(title, richDocPlainText(patchedDoc))
 
   const { error: updateError } = await admin
     .from('entries')
-    .update({ content: newContent, content_doc: patchedDoc, updated_at: new Date().toISOString() })
+    .update({
+      content: await encrypt(dek, newContent),
+      content_doc: await encrypt(dek, JSON.stringify(patchedDoc)),
+      updated_at: new Date().toISOString(),
+    })
     .eq('id', entryId)
   if (updateError) {
     throw new Error(`Failed to write transcript back to entry: ${updateError.message}`)
@@ -68,24 +84,34 @@ async function processAttachment(record: AttachmentRecord): Promise<{ skipped?: 
 
   await admin.from('attachments').update({ transcription_status: 'processing' }).eq('id', record.id)
 
-  const { data: audioFile, error: downloadError } = await admin.storage
+  const masterKey = await masterKeyPromise
+  const dek = await getUserDek(admin, masterKey, record.user_id)
+
+  const { data: encryptedAudioFile, error: downloadError } = await admin.storage
     .from(AUDIO_BUCKET)
     .download(record.storage_path)
-  if (downloadError || !audioFile) {
+  if (downloadError || !encryptedAudioFile) {
     throw new Error(`Failed to download audio: ${downloadError?.message}`)
   }
+  const encryptedBytes = new Uint8Array(await encryptedAudioFile.arrayBuffer())
+  const plainBytes = await decryptBytes(dek, encryptedBytes)
+  const audioFile = new Blob([plainBytes], { type: record.mime_type })
 
-  const transcript = await transcribeAudio(audioFile, record.filename, OPENAI_API_KEY)
+  // filename's extension is what tells Whisper the audio format -- it must
+  // be decrypted before use, not the ciphertext blob stored in the row.
+  const filename = (await decryptOrPassthrough(dek, record.filename))!
+
+  const transcript = await transcribeAudio(audioFile, filename, OPENAI_API_KEY)
 
   const { error: updateError } = await admin
     .from('attachments')
-    .update({ transcript, transcription_status: 'complete' })
+    .update({ transcript: await encrypt(dek, transcript), transcription_status: 'complete' })
     .eq('id', record.id)
   if (updateError) {
     throw new Error(`Failed to save transcript: ${updateError.message}`)
   }
 
-  await writeTranscriptToEntry(record.entry_id, record.id, transcript)
+  await writeTranscriptToEntry(record.entry_id, record.id, transcript, dek)
 
   return { transcript }
 }
@@ -119,7 +145,7 @@ Deno.serve(async (req) => {
   }
 
   const record = body.record
-  if (!record?.id || !record.entry_id || !record.storage_path || !record.mime_type) {
+  if (!record?.id || !record.entry_id || !record.user_id || !record.storage_path || !record.mime_type) {
     return new Response(JSON.stringify({ error: 'Missing required attachment fields' }), {
       status: 400,
       headers: { ...corsHeaders, 'Content-Type': 'application/json' },

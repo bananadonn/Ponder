@@ -3,6 +3,7 @@ import { chunkContent } from '../_shared/chunking.ts'
 import { corsHeaders } from '../_shared/cors.ts'
 import { EMBEDDING_MODEL, embedTexts } from '../_shared/openai.ts'
 import { EMOTION_LABELS } from '../_shared/emotionLabels.ts'
+import { base64ToBytes, decryptOrPassthrough, encrypt, getUserDek, importAesKey } from '../_shared/crypto.ts'
 
 // extractAllMetadata fires one concurrent OpenAI call per paragraph
 // (Promise.all, no concurrency limit) — unbounded input length means
@@ -47,8 +48,10 @@ const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!
 const SERVICE_ROLE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!
 const ANON_KEY = Deno.env.get('SUPABASE_ANON_KEY')!
 const OPENAI_API_KEY = Deno.env.get('OPENAI_API_KEY')!
+const ENCRYPTION_MASTER_KEY = Deno.env.get('ENCRYPTION_MASTER_KEY')!
 
 const admin = createClient(SUPABASE_URL, SERVICE_ROLE_KEY)
+const masterKeyPromise = importAesKey(base64ToBytes(ENCRYPTION_MASTER_KEY), false)
 
 async function extractMetadata(text: string): Promise<ExtractedMetadata> {
   const response = await fetch('https://api.openai.com/v1/chat/completions', {
@@ -155,7 +158,7 @@ function parseVector(v: unknown): number[] {
 // was computed with the current model/prompt versions — a version bump
 // still forces a full recompute, same as before this function existed) so
 // it can be reused instead of paying for a fresh OpenAI call.
-async function loadReusableChunks(entryId: string): Promise<Map<string, ReusableChunk[]>> {
+async function loadReusableChunks(entryId: string, dek: CryptoKey): Promise<Map<string, ReusableChunk[]>> {
   const reuseByText = new Map<string, ReusableChunk[]>()
 
   const { data: existingChunks } = await admin.from('chunks').select('id, text').eq('entry_id', entryId)
@@ -196,7 +199,11 @@ async function loadReusableChunks(entryId: string): Promise<Map<string, Reusable
       continue
     }
 
-    const queue = reuseByText.get(chunk.text) ?? []
+    // Chunks are stored encrypted with a random IV per write, so identical
+    // plaintext no longer produces identical stored bytes -- the
+    // exact-match reuse comparison must happen on decrypted text.
+    const plaintext = (await decryptOrPassthrough(dek, chunk.text))!
+    const queue = reuseByText.get(plaintext) ?? []
     queue.push({
       vector: parseVector(embedding.vector),
       embeddingModel: embedding.embedding_model,
@@ -213,7 +220,7 @@ async function loadReusableChunks(entryId: string): Promise<Map<string, Reusable
       extractionModel: metadata.extraction_model,
       extractionVersion: metadata.extraction_version,
     })
-    reuseByText.set(chunk.text, queue)
+    reuseByText.set(plaintext, queue)
   }
 
   return reuseByText
@@ -222,7 +229,7 @@ async function loadReusableChunks(entryId: string): Promise<Map<string, Reusable
 async function processEntry(entryId: string) {
   const { data: entry, error: fetchError } = await admin
     .from('entries')
-    .select('id, content')
+    .select('id, user_id, content')
     .eq('id', entryId)
     .single()
 
@@ -230,18 +237,20 @@ async function processEntry(entryId: string) {
     throw new Error(`Entry not found: ${entryId}`)
   }
 
-  if (entry.content.length > MAX_CONTENT_LENGTH) {
-    throw new Error(
-      `Entry content too long to process (${entry.content.length} chars, max ${MAX_CONTENT_LENGTH})`,
-    )
+  const masterKey = await masterKeyPromise
+  const dek = await getUserDek(admin, masterKey, entry.user_id)
+  const content = (await decryptOrPassthrough(dek, entry.content))!
+
+  if (content.length > MAX_CONTENT_LENGTH) {
+    throw new Error(`Entry content too long to process (${content.length} chars, max ${MAX_CONTENT_LENGTH})`)
   }
 
   await admin.from('entries').update({ processing_status: 'processing' }).eq('id', entryId)
 
-  const paragraphs = chunkContent(entry.content)
+  const paragraphs = chunkContent(content)
 
   // Capture anything reusable from the current chunks before wiping them.
-  const reuseByText = await loadReusableChunks(entryId)
+  const reuseByText = await loadReusableChunks(entryId, dek)
 
   // Reprocessing: clear any prior chunks (embeddings cascade with them).
   await admin.from('chunks').delete().eq('entry_id', entryId)
@@ -251,9 +260,14 @@ async function processEntry(entryId: string) {
     return { chunkCount: 0 }
   }
 
+  // Every paragraph gets freshly encrypted before insert (not just "fresh"
+  // ones) -- chunks are always deleted+reinserted above, so there's no
+  // prior ciphertext to preserve either way.
+  const encryptedTexts = await Promise.all(paragraphs.map((text) => encrypt(dek, text)))
+
   const { data: insertedChunks, error: insertChunksError } = await admin
     .from('chunks')
-    .insert(paragraphs.map((text, chunk_index) => ({ entry_id: entryId, chunk_index, text })))
+    .insert(encryptedTexts.map((text, chunk_index) => ({ entry_id: entryId, chunk_index, text })))
     .select('id, chunk_index')
 
   if (insertChunksError || !insertedChunks) {
@@ -396,6 +410,17 @@ Deno.serve(async (req) => {
   // Only reprocess UPDATEs where content actually changed; status-only
   // writes (ours) and metadata-only writes are ignored. INSERTs and
   // manual/script invocations (no old_record) always proceed.
+  //
+  // `content` is now an encrypted blob with a random IV per write, so this
+  // is a byte-comparison of ciphertext, not plaintext — it still correctly
+  // catches the status-only-write case above (that update never touches
+  // `content`, so its stored bytes are literally unchanged), but two
+  // *different* writes of the same plaintext will no longer compare equal.
+  // That's fine because EntryEditorPage's saveNow already dedupes identical
+  // plaintext client-side before ever calling updateEntry — this check is
+  // therefore also load-bearing for encryption cost control (a future save
+  // path that skips that client-side dedupe would silently re-embed/re-tag
+  // on every save rather than infinite-loop).
   if (body.type === 'UPDATE' && body.old_record && body.record?.content === body.old_record.content) {
     return new Response(JSON.stringify({ ok: true, skipped: 'content unchanged' }), {
       headers: { ...corsHeaders, 'Content-Type': 'application/json' },

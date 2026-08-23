@@ -1,19 +1,16 @@
+import { useNavigate, useParams } from 'react-router-dom'
+import { Outlet } from 'react-router-dom'
 import { useEffect, useState } from 'react'
-import { Outlet, useNavigate, useParams } from 'react-router-dom'
+import GalleryPanel from '../components/GalleryPanel'
 import Header from '../components/Header'
-import SearchBar from '../components/SearchBar'
-import EntryListItem from '../components/EntryListItem'
-import ReflectPanel from '../components/ReflectPanel'
+import MobileTabBar, { type MobileView } from '../components/MobileTabBar'
+import RackPanel from '../components/RackPanel'
+import SearchReflectPanel from '../components/SearchReflectPanel'
+import DockPanel from '../components/dock/DockPanel'
 import { useAuth } from '../hooks/useAuth'
-import { useEntries } from '../hooks/useEntries'
-
-function PlusIcon() {
-  return (
-    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-      <path d="M12 5v14M5 12h14" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
-    </svg>
-  )
-}
+import { useDockLayout } from '../hooks/useDockLayout'
+import { listEntries } from '../data/entries'
+import type { HybridFilters } from '../data/types'
 
 export type ComposerContext = {
   refresh: () => void
@@ -21,36 +18,84 @@ export type ComposerContext = {
   showList: () => void
 }
 
+// Matches Tailwind's `md` breakpoint. The desktop dock shell and the mobile
+// single-pane-at-a-time view are structurally different (floating panels use
+// fixed positioning, route Outlet has its own data-fetching side effects) —
+// picking one via JS rather than showing/hiding both with CSS keeps exactly
+// one copy of the composer/rack/search panels mounted at a time.
+function useIsDesktop(): boolean {
+  const [isDesktop, setIsDesktop] = useState(() => window.matchMedia('(min-width: 768px)').matches)
+  useEffect(() => {
+    const mql = window.matchMedia('(min-width: 768px)')
+    const onChange = () => setIsDesktop(mql.matches)
+    mql.addEventListener('change', onChange)
+    return () => mql.removeEventListener('change', onChange)
+  }, [])
+  return isDesktop
+}
+
 export default function MainLayout() {
   const { user } = useAuth()
   const { id } = useParams<{ id: string }>()
   const navigate = useNavigate()
+  const { layout, popOut, dock, resize, setFloatGeometry } = useDockLayout()
+  const isDesktop = useIsDesktop()
 
-  const [searchInput, setSearchInput] = useState('')
-  const [query, setQuery] = useState('')
+  // RackPanel owns its own entry list (filtered independently of the
+  // composer) — bump this after a save/delete so it re-fetches without
+  // losing its filter UI state, rather than remounting the whole panel.
+  const [refreshSignal, setRefreshSignal] = useState(0)
+  const refresh = () => setRefreshSignal((t) => t + 1)
+
+  // The Rack's resolved filters, shared down to Search & Reflect so
+  // Retrieval mode's search is constrained by the same emotion/topic/
+  // entity/date filters currently active in the Rack.
+  const [rackFilters, setRackFilters] = useState<HybridFilters>({})
+
+  const [mobileView, setMobileView] = useState<MobileView>('list')
+
+  // Which content the Journal panel shows — the active entry's composer, or
+  // the Rack's "see every photo in the journal" gallery. Desktop-only state:
+  // on mobile the Journal panel is whatever's docked into the 'composer'
+  // pane, so `mobileView` alone already covers switching to it.
+  const [journalView, setJournalView] = useState<'entry' | 'gallery'>('entry')
+
+  // Land a brand-new journal (no entries yet, no entry selected) straight on
+  // the composer instead of an empty list — a one-off check independent of
+  // RackPanel's own (possibly filtered) entry list.
   useEffect(() => {
-    const timeout = setTimeout(() => setQuery(searchInput), 250)
-    return () => clearTimeout(timeout)
-  }, [searchInput])
-
-  const { entries, loading, error, refresh } = useEntries(query)
-
-  // On mobile only one pane shows at a time. Land on the composer straight
-  // away for a brand-new journal (nothing to browse yet); otherwise land on
-  // the list so a returning visitor sees their entries first.
-  const [mobileView, setMobileView] = useState<'list' | 'composer' | 'reflect'>('list')
-  useEffect(() => {
-    if (!loading && entries.length === 0 && !id) setMobileView('composer')
-  }, [loading, entries.length, id])
+    if (id) return
+    listEntries()
+      .then((entries) => {
+        if (entries.length === 0) setMobileView('composer')
+      })
+      .catch(() => {})
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   function openEntry(entryId: string) {
     navigate(`/entries/${entryId}`)
+    setJournalView('entry')
     setMobileView('composer')
   }
 
   function openNewEntry() {
     navigate('/')
+    setJournalView('entry')
     setMobileView('composer')
+  }
+
+  function openGallery() {
+    setJournalView('gallery')
+    setMobileView('composer')
+  }
+
+  // Every other way of navigating (tab bar, Gallery's own back button) drops
+  // back to the entry view — gallery is a one-off detour, not something that
+  // should linger once you've moved on to another tab.
+  function selectMobileTab(view: MobileView) {
+    setJournalView('entry')
+    setMobileView(view)
   }
 
   function onSaved(newId: string) {
@@ -62,56 +107,94 @@ export default function MainLayout() {
 
   return (
     <div className="flex h-screen flex-col bg-mist-50">
-      <Header email={user?.email} onReflect={() => setMobileView('reflect')} />
+      <Header email={user?.email} />
 
-      <div className="flex min-h-0 flex-1">
-        <div
-          className={`${
-            mobileView === 'list' ? 'flex' : 'hidden'
-          } w-full shrink-0 flex-col border-r border-mist-200 bg-mist-50 md:flex md:w-[340px]`}
-        >
-          <div className="flex items-center gap-2 border-b border-mist-200 px-4 py-3">
-            <SearchBar value={searchInput} onChange={setSearchInput} />
-            <button
-              onClick={openNewEntry}
-              aria-label="New entry"
-              title="New entry"
-              className="flex h-9 w-9 shrink-0 items-center justify-center rounded-soft bg-mist-900 text-white transition-colors hover:bg-mist-700"
+      <div className="relative flex min-h-0 flex-1">
+        {isDesktop ? (
+          <>
+            <DockPanel
+              id="rack"
+              title="Rack"
+              layout={layout.rack}
+              onPopOut={() => popOut('rack')}
+              onDock={() => dock('rack')}
+              onResize={(w) => resize('rack', w)}
+              onFloatGeometryChange={(g) => setFloatGeometry('rack', g)}
+              resizeEdge="right"
+              minWidth={260}
+              maxWidth={520}
+              className="border-r border-mist-200 bg-mist-50"
             >
-              <PlusIcon />
-            </button>
-          </div>
+              <RackPanel
+                refreshSignal={refreshSignal}
+                activeEntryId={id}
+                onSelectEntry={openEntry}
+                onNewEntry={openNewEntry}
+                onOpenGallery={openGallery}
+                onFiltersChange={setRackFilters}
+              />
+            </DockPanel>
 
-          <div className="flex-1 overflow-y-auto px-2.5 py-2.5">
-            {loading && <p className="px-1.5 py-2 text-sm text-mist-500">Loading…</p>}
-            {error && <p className="px-1.5 py-2 text-sm text-red-600">{error}</p>}
+            <DockPanel
+              id="journal"
+              title="Journal"
+              layout={layout.journal}
+              onPopOut={() => popOut('journal')}
+              onDock={() => dock('journal')}
+              onFloatGeometryChange={(g) => setFloatGeometry('journal', g)}
+              minWidth={360}
+              maxWidth={1200}
+            >
+              {journalView === 'gallery' ? (
+                <GalleryPanel onOpenEntry={openEntry} onClose={() => setJournalView('entry')} />
+              ) : (
+                <Outlet context={context} />
+              )}
+            </DockPanel>
 
-            {!loading && !error && entries.length === 0 && (
-              <p className="px-1.5 py-2 text-sm text-mist-500">
-                {query ? 'No entries match your search.' : 'Nothing yet — start writing on the right.'}
-              </p>
-            )}
-
-            <div className="space-y-1.5">
-              {entries.map((entry) => (
-                <EntryListItem key={entry.id} entry={entry} active={entry.id === id} onSelect={openEntry} />
-              ))}
+            <DockPanel
+              id="search"
+              title="Search & Reflect"
+              layout={layout.search}
+              onPopOut={() => popOut('search')}
+              onDock={() => dock('search')}
+              onResize={(w) => resize('search', w)}
+              onFloatGeometryChange={(g) => setFloatGeometry('search', g)}
+              resizeEdge="left"
+              minWidth={260}
+              maxWidth={480}
+              className="border-l border-mist-200 bg-mist-50"
+            >
+              <SearchReflectPanel onOpenEntry={openEntry} filters={rackFilters} />
+            </DockPanel>
+          </>
+        ) : (
+          <>
+            <div className={`${mobileView === 'list' ? 'flex' : 'hidden'} min-h-0 w-full flex-col`}>
+              <RackPanel
+                refreshSignal={refreshSignal}
+                activeEntryId={id}
+                onSelectEntry={openEntry}
+                onNewEntry={openNewEntry}
+                onOpenGallery={openGallery}
+                onFiltersChange={setRackFilters}
+              />
             </div>
-          </div>
-        </div>
-
-        <div className={`${mobileView === 'composer' ? 'flex' : 'hidden'} min-w-0 flex-1 flex-col md:flex`}>
-          <Outlet context={context} />
-        </div>
-
-        <div
-          className={`${
-            mobileView === 'reflect' ? 'flex' : 'hidden'
-          } w-full shrink-0 flex-col border-l border-mist-200 bg-mist-50 md:flex md:w-[320px]`}
-        >
-          <ReflectPanel onOpenEntry={openEntry} onBack={() => setMobileView('list')} />
-        </div>
+            <div className={`${mobileView === 'composer' ? 'flex' : 'hidden'} min-h-0 min-w-0 flex-1 flex-col`}>
+              {journalView === 'gallery' ? (
+                <GalleryPanel onOpenEntry={openEntry} onClose={() => selectMobileTab('list')} />
+              ) : (
+                <Outlet context={context} />
+              )}
+            </div>
+            <div className={`${mobileView === 'reflect' ? 'flex' : 'hidden'} min-h-0 w-full flex-col`}>
+              <SearchReflectPanel onOpenEntry={openEntry} filters={rackFilters} />
+            </div>
+          </>
+        )}
       </div>
+
+      {!isDesktop && <MobileTabBar active={mobileView} onSelect={selectMobileTab} />}
     </div>
   )
 }

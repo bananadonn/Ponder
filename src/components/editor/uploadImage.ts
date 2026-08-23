@@ -22,6 +22,7 @@ export async function insertImageAtSelection(editor: Editor, file: File, entryId
       status: 'ready',
       attachmentId: attachment.id,
       storagePath: attachment.storage_path,
+      mimeType: attachment.mime_type,
     })
     URL.revokeObjectURL(localBlobUrl)
   } catch (err) {

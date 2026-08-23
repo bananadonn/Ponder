@@ -1,4 +1,6 @@
 import { supabase } from '../lib/supabase'
+import { decryptBytes, decryptOrPassthrough, encrypt, encryptBytes } from '../lib/crypto'
+import { getSessionDek } from '../lib/sessionKey'
 import type { Attachment } from './types'
 
 /**
@@ -6,8 +8,8 @@ import type { Attachment } from './types'
  * Mirrors the style of ./entries.ts.
  */
 
-const IMAGE_BUCKET = 'entry-images'
-const AUDIO_BUCKET = 'entry-audio'
+export const IMAGE_BUCKET = 'entry-images'
+export const AUDIO_BUCKET = 'entry-audio'
 
 // Signed URLs are requested for a full hour but cached for less, so a page
 // that stays open a long time still refreshes before the URL expires.
@@ -18,8 +20,19 @@ const SIGNED_URL_CACHE_MARGIN_SECONDS = 600
 // namespacing the cache key avoids relying on that to stay true.
 const signedUrlCache = new Map<string, { url: string; expiresAt: number }>()
 
+// Decrypted object URLs (blob:), keyed the same way. Session-lived, no
+// expiry/revoke -- bounded by how many distinct attachments are actually
+// viewed in one session, which is fine at personal-journal scale.
+const decryptedUrlCache = new Map<string, string>()
+
 function sanitizeFilename(name: string): string {
   return name.replace(/[^a-zA-Z0-9._-]/g, '_')
+}
+
+async function decryptAttachment(row: Attachment): Promise<Attachment> {
+  const dek = await getSessionDek()
+  const filename = (await decryptOrPassthrough(dek, row.filename))!
+  return { ...row, filename }
 }
 
 async function uploadToBucket(
@@ -34,7 +47,16 @@ async function uploadToBucket(
 
   const storagePath = `${userData.user.id}/${entryId}/${crypto.randomUUID()}-${sanitizeFilename(file.name)}`
 
-  const { error: uploadError } = await supabase.storage.from(bucket).upload(storagePath, file, {
+  const dek = await getSessionDek()
+  const plainBytes = new Uint8Array(await file.arrayBuffer())
+  const encryptedBytes = await encryptBytes(dek, plainBytes)
+  // Declared contentType stays the real one (satisfies the bucket's
+  // allowed_mime_types check) even though the stored bytes are now
+  // ciphertext -- a bare signed-URL open in a browser then just fails to
+  // render, which is a feature, not a bug.
+  const encryptedBlob = new Blob([encryptedBytes as BlobPart], { type: file.type })
+
+  const { error: uploadError } = await supabase.storage.from(bucket).upload(storagePath, encryptedBlob, {
     contentType: file.type,
   })
   if (uploadError) throw uploadError
@@ -45,7 +67,7 @@ async function uploadToBucket(
       entry_id: entryId,
       user_id: userData.user.id,
       storage_path: storagePath,
-      filename: file.name,
+      filename: await encrypt(dek, file.name),
       mime_type: file.type,
       size_bytes: file.size,
       ...extraColumns,
@@ -54,7 +76,7 @@ async function uploadToBucket(
     .single()
 
   if (error) throw error
-  return data
+  return decryptAttachment(data)
 }
 
 export async function uploadAttachment(entryId: string, file: File): Promise<Attachment> {
@@ -103,10 +125,46 @@ export async function getAudioSignedUrlCached(storagePath: string): Promise<stri
   return getSignedUrlCached(storagePath, AUDIO_BUCKET)
 }
 
+// Resolves a storage_path to a decrypted, directly-renderable blob: URL --
+// the signed URL alone now points at ciphertext, so <img>/<audio src=...>
+// can't use it directly. Decrypts once per (bucket, storagePath) per
+// session; callers pass the attachment's own mimeType to reconstruct the
+// right Blob type.
+export async function getDecryptedAttachmentUrl(storagePath: string, bucket: string, mimeType: string): Promise<string> {
+  const cacheKey = `${bucket}:${storagePath}`
+  const cached = decryptedUrlCache.get(cacheKey)
+  if (cached) return cached
+
+  const signedUrl = await getSignedUrlCached(storagePath, bucket)
+  const response = await fetch(signedUrl)
+  const encryptedBytes = new Uint8Array(await response.arrayBuffer())
+
+  const dek = await getSessionDek()
+  const plainBytes = await decryptBytes(dek, encryptedBytes)
+  const blob = new Blob([plainBytes as BlobPart], { type: mimeType })
+  const url = URL.createObjectURL(blob)
+  decryptedUrlCache.set(cacheKey, url)
+  return url
+}
+
 export async function listAttachmentsForEntry(entryId: string): Promise<Attachment[]> {
   const { data, error } = await supabase.from('attachments').select('*').eq('entry_id', entryId)
   if (error) throw error
-  return data
+  return Promise.all(data.map(decryptAttachment))
+}
+
+// All image attachments across every entry the user has, newest first —
+// backs the Rack's gallery view. RLS (see 0016_attachments.sql) already
+// scopes this to the current user; the mime_type filter just excludes voice
+// notes, which live in the same table.
+export async function listImageAttachments(): Promise<Attachment[]> {
+  const { data, error } = await supabase
+    .from('attachments')
+    .select('*')
+    .like('mime_type', 'image/%')
+    .order('created_at', { ascending: false })
+  if (error) throw error
+  return Promise.all(data.map(decryptAttachment))
 }
 
 // Removes the actual Storage objects for an entry's attachments. Must be
