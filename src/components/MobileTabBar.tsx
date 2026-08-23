@@ -56,7 +56,10 @@ export default function MobileTabBar({
   onSelect: (view: MobileView) => void
 }) {
   return (
-    <nav className="flex shrink-0 items-stretch border-t border-mist-200 bg-white md:hidden">
+    <nav
+      className="flex shrink-0 items-stretch border-t border-mist-200 bg-white md:hidden"
+      style={{ paddingBottom: 'env(safe-area-inset-bottom)' }}
+    >
       {TABS.map(({ view, label, icon: Icon }) => (
         <button
           key={view}
