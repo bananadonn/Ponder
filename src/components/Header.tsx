@@ -4,7 +4,10 @@ import PonderMark from './PonderMark'
 
 export default function Header({ email }: { email: string | null | undefined }) {
   return (
-    <header className="flex shrink-0 items-center justify-between border-b border-mist-200 bg-mist-50 px-4 py-3">
+    <header
+      className="flex shrink-0 items-center justify-between border-b border-mist-200 bg-mist-50 px-4 pb-3"
+      style={{ paddingTop: 'max(0.75rem, env(safe-area-inset-top))' }}
+    >
       <Link to="/" className="flex items-center gap-2 text-mist-900">
         <PonderMark className="h-5 w-auto" />
         <span className="font-display text-lg font-extrabold tracking-tight">Ponder</span>

@@ -6,11 +6,19 @@ import { clearSessionDek } from '../lib/sessionKey'
  * Framework-agnostic auth functions, shared with mobile/desktop clients later.
  */
 
-export async function signInWithMagicLink(email: string): Promise<void> {
-  const { error } = await supabase.auth.signInWithOtp({
-    email,
-    options: { emailRedirectTo: window.location.origin },
-  })
+// Password auth, not magic links/OTP: this app's own email sending is on
+// Supabase's shared free-tier provider, whose rate limit a 1-2 person app
+// can hit outright, and any emailed link/code also has to round-trip through
+// the OS's default browser -- never back into an installed home-screen PWA.
+// Password sign-in/sign-up need no email at all (enable_confirmations is off
+// in supabase/config.toml), so neither problem applies.
+export async function signInWithPassword(email: string, password: string): Promise<void> {
+  const { error } = await supabase.auth.signInWithPassword({ email, password })
+  if (error) throw error
+}
+
+export async function signUpWithPassword(email: string, password: string): Promise<void> {
+  const { error } = await supabase.auth.signUp({ email, password })
   if (error) throw error
 }
 
