@@ -119,6 +119,7 @@ export async function insertAudioAtSelection(
       status: 'ready',
       attachmentId: attachment.id,
       storagePath: attachment.storage_path,
+      mimeType: attachment.mime_type,
     })
     URL.revokeObjectURL(localBlobUrl)
   } catch (err) {

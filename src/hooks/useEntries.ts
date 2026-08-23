@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useState } from 'react'
-import { listEntries, searchEntries } from '../data/entries'
-import type { Entry } from '../data/types'
+import { listEntriesByFilters } from '../data/entries'
+import type { Entry, HybridFilters } from '../data/types'
 
-export function useEntries(query: string) {
+export function useEntries(filters: HybridFilters) {
   const [entries, setEntries] = useState<Entry[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -11,14 +11,15 @@ export function useEntries(query: string) {
     setLoading(true)
     setError(null)
     try {
-      const data = query.trim() ? await searchEntries(query) : await listEntries()
+      const data = await listEntriesByFilters(filters)
       setEntries(data)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load entries')
     } finally {
       setLoading(false)
     }
-  }, [query])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [JSON.stringify(filters)])
 
   useEffect(() => {
     refresh()

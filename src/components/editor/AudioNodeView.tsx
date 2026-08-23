@@ -1,31 +1,19 @@
-import { useEffect, useState } from 'react'
 import { NodeViewWrapper, type NodeViewProps } from '@tiptap/react'
-import { getAudioSignedUrlCached } from '../../data/attachments'
+import { AUDIO_BUCKET } from '../../data/attachments'
+import { useDecryptedAttachmentUrl } from '../../hooks/useDecryptedAttachmentUrl'
 
-// Mirrors ImageNodeView -- resolves a signed URL once the upload has
-// landed, shows a lightweight placeholder while uploading. `transcript` is
-// present on the node's attrs (see AudioNode.ts) but deliberately never
+// Mirrors ImageNodeView -- resolves a decrypted blob URL once the upload
+// has landed, shows a lightweight placeholder while uploading. `transcript`
+// is present on the node's attrs (see AudioNode.ts) but deliberately never
 // rendered here -- it exists purely so docToPlainText can pull it into the
 // entry's searchable text; the composer only ever shows a player.
 export default function AudioNodeView({ node }: NodeViewProps) {
-  const { status, localBlobUrl, storagePath, filename } = node.attrs
-  const [signedUrl, setSignedUrl] = useState<string | null>(null)
-  const [resolveFailed, setResolveFailed] = useState(false)
-
-  useEffect(() => {
-    if (status !== 'ready' || !storagePath) return
-    let cancelled = false
-    getAudioSignedUrlCached(storagePath)
-      .then((url) => {
-        if (!cancelled) setSignedUrl(url)
-      })
-      .catch(() => {
-        if (!cancelled) setResolveFailed(true)
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [status, storagePath])
+  const { status, localBlobUrl, storagePath, filename, mimeType } = node.attrs
+  const { url: decryptedUrl, failed: resolveFailed } = useDecryptedAttachmentUrl(
+    status === 'ready' ? storagePath : null,
+    AUDIO_BUCKET,
+    mimeType,
+  )
 
   if (status === 'error' || resolveFailed) {
     return (
@@ -38,7 +26,7 @@ export default function AudioNodeView({ node }: NodeViewProps) {
     )
   }
 
-  const src = status === 'uploading' ? localBlobUrl : signedUrl
+  const src = status === 'uploading' ? localBlobUrl : decryptedUrl
 
   return (
     <NodeViewWrapper as="span" className="my-1 inline-block max-w-full align-middle">

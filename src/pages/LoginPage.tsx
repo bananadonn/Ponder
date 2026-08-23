@@ -1,5 +1,6 @@
 import { FormEvent, useId, useState } from 'react'
 import { signInWithMagicLink } from '../data/auth'
+import PonderMark from '../components/PonderMark'
 
 const NOISE_BG =
   "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E\")"
@@ -63,7 +64,9 @@ export default function LoginPage() {
             background: 'linear-gradient(to top, rgba(28,32,36,0.55), transparent)',
           }}
         />
+        <PonderMark className="pointer-events-none absolute -bottom-10 -right-16 h-64 w-auto text-mist-50 opacity-[0.06] md:h-80" />
         <div className="relative max-w-md">
+          <PonderMark className="mb-4 h-7 w-auto text-mist-300 md:h-8" />
           <p className="font-display text-3xl font-extrabold tracking-tight text-mist-50 md:text-4xl">
             Ponder
           </p>

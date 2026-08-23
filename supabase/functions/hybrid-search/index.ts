@@ -9,10 +9,16 @@ import {
   type QueryEmbeddingInput,
 } from '../_shared/queryEmbeddingInput.ts'
 import { extractQueryFilters, type QueryExtractionResult } from '../_shared/queryExtraction.ts'
+import { base64ToBytes, encrypt, getUserDek, importAesKey } from '../_shared/crypto.ts'
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!
+const SERVICE_ROLE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!
 const ANON_KEY = Deno.env.get('SUPABASE_ANON_KEY')!
 const OPENAI_API_KEY = Deno.env.get('OPENAI_API_KEY')!
+const ENCRYPTION_MASTER_KEY = Deno.env.get('ENCRYPTION_MASTER_KEY')!
+
+const admin = createClient(SUPABASE_URL, SERVICE_ROLE_KEY)
+const masterKeyPromise = importAesKey(base64ToBytes(ENCRYPTION_MASTER_KEY), false)
 
 // Same starting point as phase 3 — tune via the debug page, not here.
 const DEFAULT_SIMILARITY_THRESHOLD = 0.3
@@ -213,11 +219,14 @@ async function logQuery(client: SupabaseClient, entry: QueryLogEntry): Promise<v
   const { data: userData, error: userError } = await client.auth.getUser()
   if (userError || !userData?.user) return
 
+  const masterKey = await masterKeyPromise
+  const dek = await getUserDek(admin, masterKey, userData.user.id)
+
   const { error } = await client.from('query_log').insert({
     user_id: userData.user.id,
-    query: entry.query,
+    query: await encrypt(dek, entry.query),
     embedding_strategy: entry.embeddingStrategy,
-    hyde_text: entry.hydeText,
+    hyde_text: entry.hydeText === null ? null : await encrypt(dek, entry.hydeText),
     matched: entry.matched,
     result_count: entry.resultCount,
     extracted_emotion: entry.extraction?.emotion.value ?? null,

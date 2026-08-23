@@ -1,9 +1,5 @@
+import { splitContent } from '../lib/richDoc'
 import type { Entry } from '../data/types'
-
-function preview(content: string, maxLength = 120): string {
-  const oneLine = content.replace(/\s+/g, ' ').trim()
-  return oneLine.length > maxLength ? `${oneLine.slice(0, maxLength)}…` : oneLine
-}
 
 export default function EntryListItem({
   entry,
@@ -19,6 +15,7 @@ export default function EntryListItem({
     day: 'numeric',
     year: 'numeric',
   })
+  const title = splitContent(entry.content).title.trim()
 
   return (
     <button
@@ -29,7 +26,7 @@ export default function EntryListItem({
       }`}
     >
       <p className="mb-0.5 text-xs font-medium text-mist-500">{date}</p>
-      <p className="truncate text-sm text-mist-800">{preview(entry.content) || 'Empty entry'}</p>
+      <p className="truncate text-sm text-mist-800">{title || 'Untitled entry'}</p>
     </button>
   )
 }

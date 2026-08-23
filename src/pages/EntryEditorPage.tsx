@@ -225,6 +225,12 @@ export default function EntryEditorPage() {
 
   const saveNow = useCallback(
     async (content: string, opts: { navigateOnCreate: boolean } = { navigateOnCreate: true }) => {
+      // Also load-bearing for process-entry's webhook loop guard and
+      // encryption cost: entries.content is stored encrypted with a random
+      // IV per write, so identical plaintext no longer produces identical
+      // ciphertext bytes server-side. Skipping the no-op save here (rather
+      // than relying on any server-side dedupe) is what keeps an unchanged
+      // save from silently re-billing an OpenAI re-embed/re-tag pass.
       if (content === lastSavedRef.current) return
       setError(null)
       if (entryIdRef.current) {
