@@ -43,6 +43,13 @@ export default class ErrorBoundary extends Component<Props, State> {
         >
           Reload
         </button>
+        <details className="mt-2 max-w-sm text-left">
+          <summary className="cursor-pointer text-xs font-medium text-mist-400">Show error details</summary>
+          <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap break-words rounded-soft bg-mist-100 p-3 text-left text-xs text-mist-600">
+            {this.state.error.name}: {this.state.error.message}
+            {this.state.error.stack ? `\n\n${this.state.error.stack}` : ''}
+          </pre>
+        </details>
       </div>
     )
   }
