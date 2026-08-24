@@ -1,5 +1,6 @@
 import { supabase } from './supabase'
 import { base64ToBytes, importAesKey } from './crypto'
+import { describeFunctionError } from './functionError'
 
 /**
  * Caches the current user's per-session Data Encryption Key (DEK), fetched
@@ -30,7 +31,7 @@ export async function getSessionDek(): Promise<CryptoKey> {
   pending = (async () => {
     try {
       const { data: fnData, error: fnError } = await supabase.functions.invoke('derive-key')
-      if (fnError) throw fnError
+      if (fnError) throw new Error(`derive-key failed: ${await describeFunctionError(fnError)}`)
       const key = await importAesKey(base64ToBytes(fnData.dek), false)
       cachedKey = key
       cachedUserId = userId

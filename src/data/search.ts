@@ -1,5 +1,6 @@
 import { supabase } from '../lib/supabase'
 import { decryptOrPassthrough } from '../lib/crypto'
+import { describeFunctionError } from '../lib/functionError'
 import { getSessionDek } from '../lib/sessionKey'
 import type { EmbeddingStrategy, HybridFilters, HybridResult, QueryExtractionResult, SearchResult } from './types'
 
@@ -63,7 +64,7 @@ export async function searchChunks(query: string, options?: SearchOptions): Prom
   const { data, error } = await supabase.functions.invoke('search-chunks', {
     body: { query, threshold: options?.threshold, limit: options?.limit },
   })
-  if (error) throw error
+  if (error) throw new Error(`search-chunks failed: ${await describeFunctionError(error)}`)
   const dek = await getSessionDek()
   return Promise.all(
     data.results.map(async (r: SearchResult) => ({ ...r, text: (await decryptOrPassthrough(dek, r.text))! })),
@@ -107,7 +108,7 @@ export async function hybridSearch(
       autoExtractFilters: options?.autoExtractFilters,
     },
   })
-  if (error) throw error
+  if (error) throw new Error(`hybrid-search failed: ${await describeFunctionError(error)}`)
   if (!data.matched) return data
 
   const dek = await getSessionDek()
