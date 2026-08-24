@@ -51,7 +51,14 @@ export function useEntryEditor({ onUpdate, onImageFiles }: UseEntryEditorOptions
         }),
       ],
       content: EMPTY_DOC,
-      immediatelyRender: true,
+      // false is the officially recommended setting for a React app (see
+      // Tiptap's docs on this option): true constructs the editor's view
+      // synchronously during render instead of in an effect, which races
+      // React's own commit/cleanup timing and can tear the view down while
+      // something still holds a reference to it -- surfaces as "null is not
+      // an object (evaluating 'this.commandManager.commands')" or similar.
+      // No SSR here, so there's no hydration downside to turning it off.
+      immediatelyRender: false,
       onUpdate: ({ editor }) => onUpdateRef.current(editor.getJSON()),
       editorProps: {
         attributes: {
