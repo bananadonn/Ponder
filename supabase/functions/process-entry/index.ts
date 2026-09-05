@@ -1,9 +1,10 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
 import { chunkContent } from '../_shared/chunking.ts'
 import { corsHeaders } from '../_shared/cors.ts'
-import { EMBEDDING_MODEL, embedTexts } from '../_shared/openai.ts'
+import { chatCompletion, EMBEDDING_MODEL, embedTexts } from '../_shared/openai.ts'
 import { EMOTION_LABELS } from '../_shared/emotionLabels.ts'
 import { base64ToBytes, decryptOrPassthrough, encrypt, getUserDek, importAesKey } from '../_shared/crypto.ts'
+import { assertUnderDailyCap, DailyUsageCapError, recordUsage } from '../_shared/usage.ts'
 
 // extractAllMetadata fires one concurrent OpenAI call per paragraph
 // (Promise.all, no concurrency limit) — unbounded input length means
@@ -53,14 +54,9 @@ const ENCRYPTION_MASTER_KEY = Deno.env.get('ENCRYPTION_MASTER_KEY')!
 const admin = createClient(SUPABASE_URL, SERVICE_ROLE_KEY)
 const masterKeyPromise = importAesKey(base64ToBytes(ENCRYPTION_MASTER_KEY), false)
 
-async function extractMetadata(text: string): Promise<ExtractedMetadata> {
-  const response = await fetch('https://api.openai.com/v1/chat/completions', {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${OPENAI_API_KEY}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
+async function extractMetadata(text: string): Promise<{ metadata: ExtractedMetadata; costUsd: number }> {
+  const { json, costUsd } = await chatCompletion(
+    {
       model: EXTRACTION_MODEL,
       messages: [
         { role: 'system', content: EXTRACTION_SYSTEM_PROMPT },
@@ -106,19 +102,20 @@ async function extractMetadata(text: string): Promise<ExtractedMetadata> {
           },
         },
       },
-    }),
-  })
+    },
+    OPENAI_API_KEY,
+    'extraction',
+  )
 
-  if (!response.ok) {
-    throw new Error(`OpenAI extraction request failed: ${response.status} ${await response.text()}`)
-  }
-
-  const json = await response.json()
-  return JSON.parse(json.choices[0].message.content)
+  return { metadata: JSON.parse(json.choices[0].message.content), costUsd }
 }
 
-async function extractAllMetadata(texts: string[]): Promise<ExtractedMetadata[]> {
-  return Promise.all(texts.map(extractMetadata))
+async function extractAllMetadata(texts: string[]): Promise<{ metadata: ExtractedMetadata[]; costUsd: number }> {
+  const extracted = await Promise.all(texts.map(extractMetadata))
+  return {
+    metadata: extracted.map((e) => e.metadata),
+    costUsd: extracted.reduce((sum, e) => sum + e.costUsd, 0),
+  }
 }
 
 interface ReusableChunk {
@@ -237,144 +234,158 @@ async function processEntry(entryId: string) {
     throw new Error(`Entry not found: ${entryId}`)
   }
 
-  const masterKey = await masterKeyPromise
-  const dek = await getUserDek(admin, masterKey, entry.user_id)
-  const content = (await decryptOrPassthrough(dek, entry.content))!
+  let costUsd = 0
+  try {
+    const masterKey = await masterKeyPromise
+    const dek = await getUserDek(admin, masterKey, entry.user_id)
+    const content = (await decryptOrPassthrough(dek, entry.content))!
 
-  if (content.length > MAX_CONTENT_LENGTH) {
-    throw new Error(`Entry content too long to process (${content.length} chars, max ${MAX_CONTENT_LENGTH})`)
-  }
+    if (content.length > MAX_CONTENT_LENGTH) {
+      throw new Error(`Entry content too long to process (${content.length} chars, max ${MAX_CONTENT_LENGTH})`)
+    }
 
-  await admin.from('entries').update({ processing_status: 'processing' }).eq('id', entryId)
+    await admin.from('entries').update({ processing_status: 'processing' }).eq('id', entryId)
 
-  const paragraphs = chunkContent(content)
+    const paragraphs = chunkContent(content)
 
-  // Capture anything reusable from the current chunks before wiping them.
-  const reuseByText = await loadReusableChunks(entryId, dek)
+    // Capture anything reusable from the current chunks before wiping them.
+    const reuseByText = await loadReusableChunks(entryId, dek)
 
-  // Reprocessing: clear any prior chunks (embeddings cascade with them).
-  await admin.from('chunks').delete().eq('entry_id', entryId)
+    // Reprocessing: clear any prior chunks (embeddings cascade with them).
+    await admin.from('chunks').delete().eq('entry_id', entryId)
 
-  if (paragraphs.length === 0) {
+    if (paragraphs.length === 0) {
+      await admin.from('entries').update({ processing_status: 'complete' }).eq('id', entryId)
+      return { chunkCount: 0 }
+    }
+
+    // Every paragraph gets freshly encrypted before insert (not just "fresh"
+    // ones) -- chunks are always deleted+reinserted above, so there's no
+    // prior ciphertext to preserve either way.
+    const encryptedTexts = await Promise.all(paragraphs.map((text) => encrypt(dek, text)))
+
+    const { data: insertedChunks, error: insertChunksError } = await admin
+      .from('chunks')
+      .insert(encryptedTexts.map((text, chunk_index) => ({ entry_id: entryId, chunk_index, text })))
+      .select('id, chunk_index')
+
+    if (insertChunksError || !insertedChunks) {
+      throw new Error(`Failed to insert chunks: ${insertChunksError?.message}`)
+    }
+
+    // Reuse a matching existing chunk's embedding/metadata by exact text match
+    // (a queue per text, so duplicate paragraphs each get their own prior
+    // record); anything left over needs a fresh OpenAI call.
+    const reused = new Map<number, ReusableChunk>()
+    const freshIndexes: number[] = []
+    paragraphs.forEach((text, chunk_index) => {
+      const match = reuseByText.get(text)?.shift()
+      if (match) {
+        reused.set(chunk_index, match)
+      } else {
+        freshIndexes.push(chunk_index)
+      }
+    })
+
+    console.log(
+      `process-entry ${entryId}: ${freshIndexes.length} fresh, ${reused.size} reused of ${paragraphs.length} paragraphs`,
+    )
+
+    const freshTexts = freshIndexes.map((i) => paragraphs[i])
+
+    // Embedding and metadata extraction are independent LLM calls over the
+    // same chunks — run them concurrently rather than one after the other.
+    // Skipped entirely when every paragraph was reused, in which case the
+    // daily cap never needs checking either (nothing to spend).
+    let freshVectors: number[][] = []
+    let freshMetadataList: ExtractedMetadata[] = []
+    if (freshTexts.length > 0) {
+      await assertUnderDailyCap(admin, entry.user_id)
+      const [embeddings, metadata] = await Promise.all([
+        embedTexts(freshTexts, OPENAI_API_KEY),
+        extractAllMetadata(freshTexts),
+      ])
+      costUsd = embeddings.costUsd + metadata.costUsd
+      freshVectors = embeddings.vectors
+      freshMetadataList = metadata.metadata
+    }
+
+    const embeddingByChunkIndex = new Map<
+      number,
+      { vector: number[]; embedding_model: string; embedding_version: string }
+    >()
+    const metadataByChunkIndex = new Map<
+      number,
+      ExtractedMetadata & { extraction_model: string; extraction_version: string }
+    >()
+
+    freshIndexes.forEach((chunk_index, i) => {
+      embeddingByChunkIndex.set(chunk_index, {
+        vector: freshVectors[i],
+        embedding_model: EMBEDDING_MODEL,
+        embedding_version: EMBEDDING_VERSION,
+      })
+      metadataByChunkIndex.set(chunk_index, {
+        ...freshMetadataList[i],
+        extraction_model: EXTRACTION_MODEL,
+        extraction_version: EXTRACTION_VERSION,
+      })
+    })
+
+    for (const [chunk_index, r] of reused) {
+      embeddingByChunkIndex.set(chunk_index, {
+        vector: r.vector,
+        embedding_model: r.embeddingModel,
+        embedding_version: r.embeddingVersion,
+      })
+      metadataByChunkIndex.set(chunk_index, {
+        ...r.metadata,
+        extraction_model: r.extractionModel,
+        extraction_version: r.extractionVersion,
+      })
+    }
+
+    const embeddingRows = insertedChunks.map(({ id, chunk_index }: { id: string; chunk_index: number }) => {
+      const e = embeddingByChunkIndex.get(chunk_index)!
+      return {
+        chunk_id: id,
+        vector: e.vector,
+        embedding_model: e.embedding_model,
+        embedding_version: e.embedding_version,
+      }
+    })
+
+    const { error: insertEmbeddingsError } = await admin.from('embeddings').insert(embeddingRows)
+    if (insertEmbeddingsError) {
+      throw new Error(`Failed to insert embeddings: ${insertEmbeddingsError.message}`)
+    }
+
+    const metadataRows = insertedChunks.map(({ id, chunk_index }: { id: string; chunk_index: number }) => {
+      const m = metadataByChunkIndex.get(chunk_index)!
+      return {
+        chunk_id: id,
+        emotion: m.emotion,
+        emotion_confidence: m.emotion_confidence,
+        secondary_emotion: m.secondary_emotion,
+        secondary_emotion_confidence: m.secondary_emotion_confidence,
+        intensity: m.intensity,
+        topics: m.topics,
+        entities: m.entities,
+        extraction_model: m.extraction_model,
+        extraction_version: m.extraction_version,
+      }
+    })
+
+    const { error: insertMetadataError } = await admin.from('chunk_metadata').insert(metadataRows)
+    if (insertMetadataError) {
+      throw new Error(`Failed to insert chunk metadata: ${insertMetadataError.message}`)
+    }
+
     await admin.from('entries').update({ processing_status: 'complete' }).eq('id', entryId)
-    return { chunkCount: 0 }
+    return { chunkCount: insertedChunks.length }
+  } finally {
+    await recordUsage(admin, entry.user_id, 'process-entry', costUsd)
   }
-
-  // Every paragraph gets freshly encrypted before insert (not just "fresh"
-  // ones) -- chunks are always deleted+reinserted above, so there's no
-  // prior ciphertext to preserve either way.
-  const encryptedTexts = await Promise.all(paragraphs.map((text) => encrypt(dek, text)))
-
-  const { data: insertedChunks, error: insertChunksError } = await admin
-    .from('chunks')
-    .insert(encryptedTexts.map((text, chunk_index) => ({ entry_id: entryId, chunk_index, text })))
-    .select('id, chunk_index')
-
-  if (insertChunksError || !insertedChunks) {
-    throw new Error(`Failed to insert chunks: ${insertChunksError?.message}`)
-  }
-
-  // Reuse a matching existing chunk's embedding/metadata by exact text match
-  // (a queue per text, so duplicate paragraphs each get their own prior
-  // record); anything left over needs a fresh OpenAI call.
-  const reused = new Map<number, ReusableChunk>()
-  const freshIndexes: number[] = []
-  paragraphs.forEach((text, chunk_index) => {
-    const match = reuseByText.get(text)?.shift()
-    if (match) {
-      reused.set(chunk_index, match)
-    } else {
-      freshIndexes.push(chunk_index)
-    }
-  })
-
-  console.log(
-    `process-entry ${entryId}: ${freshIndexes.length} fresh, ${reused.size} reused of ${paragraphs.length} paragraphs`,
-  )
-
-  const freshTexts = freshIndexes.map((i) => paragraphs[i])
-
-  // Embedding and metadata extraction are independent LLM calls over the
-  // same chunks — run them concurrently rather than one after the other.
-  // Skipped entirely when every paragraph was reused.
-  const [freshEmbeddings, freshMetadata] =
-    freshTexts.length > 0
-      ? await Promise.all([embedTexts(freshTexts, OPENAI_API_KEY), extractAllMetadata(freshTexts)])
-      : [[] as number[][], [] as ExtractedMetadata[]]
-
-  const embeddingByChunkIndex = new Map<
-    number,
-    { vector: number[]; embedding_model: string; embedding_version: string }
-  >()
-  const metadataByChunkIndex = new Map<
-    number,
-    ExtractedMetadata & { extraction_model: string; extraction_version: string }
-  >()
-
-  freshIndexes.forEach((chunk_index, i) => {
-    embeddingByChunkIndex.set(chunk_index, {
-      vector: freshEmbeddings[i],
-      embedding_model: EMBEDDING_MODEL,
-      embedding_version: EMBEDDING_VERSION,
-    })
-    metadataByChunkIndex.set(chunk_index, {
-      ...freshMetadata[i],
-      extraction_model: EXTRACTION_MODEL,
-      extraction_version: EXTRACTION_VERSION,
-    })
-  })
-
-  for (const [chunk_index, r] of reused) {
-    embeddingByChunkIndex.set(chunk_index, {
-      vector: r.vector,
-      embedding_model: r.embeddingModel,
-      embedding_version: r.embeddingVersion,
-    })
-    metadataByChunkIndex.set(chunk_index, {
-      ...r.metadata,
-      extraction_model: r.extractionModel,
-      extraction_version: r.extractionVersion,
-    })
-  }
-
-  const embeddingRows = insertedChunks.map(({ id, chunk_index }: { id: string; chunk_index: number }) => {
-    const e = embeddingByChunkIndex.get(chunk_index)!
-    return {
-      chunk_id: id,
-      vector: e.vector,
-      embedding_model: e.embedding_model,
-      embedding_version: e.embedding_version,
-    }
-  })
-
-  const { error: insertEmbeddingsError } = await admin.from('embeddings').insert(embeddingRows)
-  if (insertEmbeddingsError) {
-    throw new Error(`Failed to insert embeddings: ${insertEmbeddingsError.message}`)
-  }
-
-  const metadataRows = insertedChunks.map(({ id, chunk_index }: { id: string; chunk_index: number }) => {
-    const m = metadataByChunkIndex.get(chunk_index)!
-    return {
-      chunk_id: id,
-      emotion: m.emotion,
-      emotion_confidence: m.emotion_confidence,
-      secondary_emotion: m.secondary_emotion,
-      secondary_emotion_confidence: m.secondary_emotion_confidence,
-      intensity: m.intensity,
-      topics: m.topics,
-      entities: m.entities,
-      extraction_model: m.extraction_model,
-      extraction_version: m.extraction_version,
-    }
-  })
-
-  const { error: insertMetadataError } = await admin.from('chunk_metadata').insert(metadataRows)
-  if (insertMetadataError) {
-    throw new Error(`Failed to insert chunk metadata: ${insertMetadataError.message}`)
-  }
-
-  await admin.from('entries').update({ processing_status: 'complete' }).eq('id', entryId)
-  return { chunkCount: insertedChunks.length }
 }
 
 Deno.serve(async (req) => {
@@ -458,7 +469,7 @@ Deno.serve(async (req) => {
     await admin.from('entries').update({ processing_status: 'failed' }).eq('id', entryId)
     const message = err instanceof Error ? err.message : 'Unknown error'
     return new Response(JSON.stringify({ ok: false, error: message }), {
-      status: 500,
+      status: err instanceof DailyUsageCapError ? 429 : 500,
       headers: { ...corsHeaders, 'Content-Type': 'application/json' },
     })
   }

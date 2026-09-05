@@ -2,6 +2,7 @@ import type { SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2'
 import { EMOTION_LABELS, type EmotionLabel } from './emotionLabels.ts'
 import { matchEmotionKeywords } from './emotionSynonyms.ts'
 import { listKnownEntities, listKnownTopics, matchKnownVocab } from './vocabMatch.ts'
+import { chatCompletion } from './openai.ts'
 
 const EXTRACTION_MODEL = 'gpt-4o-mini'
 
@@ -16,6 +17,7 @@ export interface QueryExtractionResult {
   emotion: ExtractedField<EmotionLabel[]>
   topics: ExtractedField<string[]>
   entities: ExtractedField<string[]>
+  costUsd: number
 }
 
 interface LlmExtractionResult {
@@ -65,7 +67,7 @@ async function llmExtractFields(
   question: string,
   need: FieldsNeeded,
   apiKey: string,
-): Promise<LlmExtractionResult> {
+): Promise<{ result: LlmExtractionResult; costUsd: number }> {
   const properties: Record<string, unknown> = {}
   const required: string[] = []
   const instructions: string[] = []
@@ -109,16 +111,11 @@ async function llmExtractFields(
   // Nothing left to ask for — e.g. topics was the only requested field and
   // there's no known-topic vocabulary yet to choose from. Skip the call.
   if (Object.keys(properties).length === 0) {
-    return {}
+    return { result: {}, costUsd: 0 }
   }
 
-  const response = await fetch('https://api.openai.com/v1/chat/completions', {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
+  const { json, costUsd } = await chatCompletion(
+    {
       model: EXTRACTION_MODEL,
       messages: [
         {
@@ -135,15 +132,12 @@ async function llmExtractFields(
           schema: { type: 'object', properties, required, additionalProperties: false },
         },
       },
-    }),
-  })
+    },
+    apiKey,
+    'query extraction',
+  )
 
-  if (!response.ok) {
-    throw new Error(`OpenAI query extraction request failed: ${response.status} ${await response.text()}`)
-  }
-
-  const json = await response.json()
-  return JSON.parse(json.choices[0].message.content)
+  return { result: JSON.parse(json.choices[0].message.content), costUsd }
 }
 
 /**
@@ -201,9 +195,12 @@ export async function extractQueryFilters(
   // resolved (e.g. a topics/entities LLM error shouldn't erase a
   // successful keyword match on emotion).
   let llmResult: LlmExtractionResult = {}
+  let costUsd = 0
   if (need.emotion || need.topics || need.entities) {
     try {
-      llmResult = await llmExtractFields(client, question, need, apiKey)
+      const extracted = await llmExtractFields(client, question, need, apiKey)
+      llmResult = extracted.result
+      costUsd = extracted.costUsd
     } catch (err) {
       console.error('LLM query-extraction fallback failed; leaving requested fields unresolved', err)
     }
@@ -225,5 +222,6 @@ export async function extractQueryFilters(
       vocabMatches.entities.length > 0
         ? { value: vocabMatches.entities, resolvedBy: 'keyword' }
         : { value: llmResult.entities ?? [], resolvedBy: 'llm' },
+    costUsd,
   }
 }

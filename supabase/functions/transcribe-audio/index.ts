@@ -3,6 +3,7 @@ import { corsHeaders } from '../_shared/cors.ts'
 import { transcribeAudio } from '../_shared/openai.ts'
 import { joinContent, richDocPlainText, setAudioTranscript, splitContentTitle } from '../_shared/richDocPlainText.ts'
 import { base64ToBytes, decryptBytes, decryptOrPassthrough, encrypt, getUserDek, importAesKey } from '../_shared/crypto.ts'
+import { assertUnderDailyCap, DailyUsageCapError, recordUsage } from '../_shared/usage.ts'
 
 const AUDIO_BUCKET = 'entry-audio'
 
@@ -84,36 +85,45 @@ async function processAttachment(record: AttachmentRecord): Promise<{ skipped?: 
 
   await admin.from('attachments').update({ transcription_status: 'processing' }).eq('id', record.id)
 
-  const masterKey = await masterKeyPromise
-  const dek = await getUserDek(admin, masterKey, record.user_id)
+  let costUsd = 0
+  try {
+    await assertUnderDailyCap(admin, record.user_id)
 
-  const { data: encryptedAudioFile, error: downloadError } = await admin.storage
-    .from(AUDIO_BUCKET)
-    .download(record.storage_path)
-  if (downloadError || !encryptedAudioFile) {
-    throw new Error(`Failed to download audio: ${downloadError?.message}`)
+    const masterKey = await masterKeyPromise
+    const dek = await getUserDek(admin, masterKey, record.user_id)
+
+    const { data: encryptedAudioFile, error: downloadError } = await admin.storage
+      .from(AUDIO_BUCKET)
+      .download(record.storage_path)
+    if (downloadError || !encryptedAudioFile) {
+      throw new Error(`Failed to download audio: ${downloadError?.message}`)
+    }
+    const encryptedBytes = new Uint8Array(await encryptedAudioFile.arrayBuffer())
+    const plainBytes = await decryptBytes(dek, encryptedBytes)
+    const audioFile = new Blob([plainBytes], { type: record.mime_type })
+
+    // filename's extension is what tells Whisper the audio format -- it must
+    // be decrypted before use, not the ciphertext blob stored in the row.
+    const filename = (await decryptOrPassthrough(dek, record.filename))!
+
+    const transcribed = await transcribeAudio(audioFile, filename, OPENAI_API_KEY)
+    costUsd = transcribed.costUsd
+    const transcript = transcribed.text
+
+    const { error: updateError } = await admin
+      .from('attachments')
+      .update({ transcript: await encrypt(dek, transcript), transcription_status: 'complete' })
+      .eq('id', record.id)
+    if (updateError) {
+      throw new Error(`Failed to save transcript: ${updateError.message}`)
+    }
+
+    await writeTranscriptToEntry(record.entry_id, record.id, transcript, dek)
+
+    return { transcript }
+  } finally {
+    await recordUsage(admin, record.user_id, 'transcribe-audio', costUsd)
   }
-  const encryptedBytes = new Uint8Array(await encryptedAudioFile.arrayBuffer())
-  const plainBytes = await decryptBytes(dek, encryptedBytes)
-  const audioFile = new Blob([plainBytes], { type: record.mime_type })
-
-  // filename's extension is what tells Whisper the audio format -- it must
-  // be decrypted before use, not the ciphertext blob stored in the row.
-  const filename = (await decryptOrPassthrough(dek, record.filename))!
-
-  const transcript = await transcribeAudio(audioFile, filename, OPENAI_API_KEY)
-
-  const { error: updateError } = await admin
-    .from('attachments')
-    .update({ transcript: await encrypt(dek, transcript), transcription_status: 'complete' })
-    .eq('id', record.id)
-  if (updateError) {
-    throw new Error(`Failed to save transcript: ${updateError.message}`)
-  }
-
-  await writeTranscriptToEntry(record.entry_id, record.id, transcript, dek)
-
-  return { transcript }
 }
 
 Deno.serve(async (req) => {
@@ -161,7 +171,7 @@ Deno.serve(async (req) => {
     await admin.from('attachments').update({ transcription_status: 'failed' }).eq('id', record.id)
     const message = err instanceof Error ? err.message : 'Unknown error'
     return new Response(JSON.stringify({ ok: false, error: message }), {
-      status: 500,
+      status: err instanceof DailyUsageCapError ? 429 : 500,
       headers: { ...corsHeaders, 'Content-Type': 'application/json' },
     })
   }

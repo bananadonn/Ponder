@@ -20,6 +20,9 @@ export interface QueryEmbeddingInput {
   // use it for embedding, never surface it to the user or pass it into
   // synthesis.
   text: string
+  // What generating `text` itself cost (0 for 'raw', which makes no LLM
+  // call) — separate from whatever embedding it afterward costs.
+  costUsd: number
 }
 
 export async function buildQueryEmbeddingInput(
@@ -28,7 +31,8 @@ export async function buildQueryEmbeddingInput(
   apiKey: string,
 ): Promise<QueryEmbeddingInput> {
   if (strategy === 'hyde') {
-    return { strategy, text: await generateHypotheticalEntry(question, apiKey) }
+    const { text, costUsd } = await generateHypotheticalEntry(question, apiKey)
+    return { strategy, text, costUsd }
   }
-  return { strategy, text: question }
+  return { strategy, text: question, costUsd: 0 }
 }
