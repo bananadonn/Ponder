@@ -11,3 +11,17 @@
   pointer-events: none;
   @apply text-mist-400;
 }
+
+/* iOS Safari auto-zooms the viewport when focusing a text field whose
+   computed font-size is under 16px -- with maximum-scale locked in
+   index.html that zoom never resets, so the frame stays stuck until the
+   user manually pinches back out. Force 16px on mobile only, so desktop
+   styling (which uses smaller Tailwind text sizes) is unaffected. */
+@media (max-width: 767px) {
+  input,
+  textarea,
+  select,
+  .ProseMirror {
+    font-size: 16px;
+  }
+}
