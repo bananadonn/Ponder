@@ -138,31 +138,70 @@ export default function DockPanel({
     window.addEventListener('pointerup', onUp)
   }
 
-  if (layout.floating && layout.float) {
-    const float = layout.float
-    return (
-      // The rounded/clipped card lives in an inner wrapper so the resize
-      // handle (an outer sibling) never gets clipped by the corner radius —
-      // a handle positioned at the exact corner of an `overflow-hidden`
-      // rounded container loses most of its hit area to the curve.
-      <div className="fixed z-40" style={{ left: float.x, top: float.y, width: float.width, height: float.height }}>
-        <div className="flex h-full w-full flex-col overflow-hidden rounded-card border border-mist-200 bg-white shadow-rest">
-          <div
-            onPointerDown={handleDragStart}
-            className="flex shrink-0 cursor-move select-none items-center justify-between border-b border-mist-200 bg-mist-50 px-3 py-2"
+  const isJournal = id === 'journal'
+  const isFloating = Boolean(layout.floating && layout.float)
+  const float = layout.float
+
+  // One structurally stable tree for both docked and floating -- only
+  // classNames/handlers branch inline, `children`'s position never does.
+  // This used to be two differently-shaped `return`s (one per mode), which
+  // meant popping a panel out or back in changed where `children` sat in
+  // the JSX tree. React reconciles by position, not by "is this logically
+  // the same panel", so that read as an unrelated subtree and silently
+  // unmounted+remounted `children` on every pop/dock -- discarding
+  // whatever state lived inside it (an in-progress Reflect conversation),
+  // and worse, resetting EntryEditorPage's "this draft already has a DB
+  // row" tracking, which made its flush-unsaved-changes-on-unmount safety
+  // net create a fresh duplicate entry on every pop-out/dock-back cycle.
+  return (
+    <div
+      className={
+        isFloating
+          ? 'fixed z-40'
+          : `relative flex min-h-0 flex-col ${isJournal ? 'flex-1' : 'shrink-0'} ${className ?? ''}`
+      }
+      style={
+        isFloating && float
+          ? { left: float.x, top: float.y, width: float.width, height: float.height }
+          : isJournal
+            ? undefined
+            : { width: layout.dockedWidth ?? minWidth }
+      }
+    >
+      {/* The rounded/clipped card lives in this inner wrapper so the
+          floating resize handle (an outer sibling below) never gets
+          clipped by the corner radius -- a handle positioned at the exact
+          corner of an `overflow-hidden` rounded container loses most of
+          its hit area to the curve. Docked mode doesn't need the card
+          look, but keeps the same wrapper so `children` stays at the same
+          tree depth either way. */}
+      <div
+        className={
+          isFloating
+            ? 'flex h-full w-full flex-col overflow-hidden rounded-card border border-mist-200 bg-white shadow-rest'
+            : 'flex h-full min-h-0 flex-1 flex-col'
+        }
+      >
+        <div
+          onPointerDown={isFloating ? handleDragStart : undefined}
+          className={`flex shrink-0 items-center justify-between border-b border-mist-200 px-3 py-2 ${
+            isFloating ? 'cursor-move select-none bg-mist-50' : ''
+          }`}
+        >
+          <span className="text-xs font-semibold uppercase tracking-wide text-mist-500">{title}</span>
+          <button
+            onClick={isFloating ? onDock : onPopOut}
+            aria-label={isFloating ? `Dock ${title}` : `Pop out ${title}`}
+            title={isFloating ? 'Dock' : 'Pop out'}
+            className="text-mist-400 transition-colors hover:text-mist-700"
           >
-            <span className="text-xs font-semibold uppercase tracking-wide text-mist-500">{title}</span>
-            <button
-              onClick={onDock}
-              aria-label={`Dock ${title}`}
-              title="Dock"
-              className="text-mist-400 transition-colors hover:text-mist-700"
-            >
-              <DockIcon />
-            </button>
-          </div>
-          <div className="min-h-0 flex-1 overflow-hidden">{children}</div>
+            {isFloating ? <DockIcon /> : <PopOutIcon />}
+          </button>
         </div>
+        <div className="min-h-0 flex-1 overflow-hidden">{children}</div>
+      </div>
+
+      {isFloating && float && (
         <div
           onPointerDown={handleFloatResizeStart}
           aria-label={`Resize ${title}`}
@@ -173,30 +212,8 @@ export default function DockPanel({
             <path d="M8 2 2 8M8 6 6 8" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
           </svg>
         </div>
-      </div>
-    )
-  }
-
-  const isJournal = id === 'journal'
-
-  return (
-    <div
-      className={`relative flex min-h-0 flex-col ${isJournal ? 'flex-1' : 'shrink-0'} ${className ?? ''}`}
-      style={isJournal ? undefined : { width: layout.dockedWidth ?? minWidth }}
-    >
-      <div className="flex shrink-0 items-center justify-between border-b border-mist-200 px-3 py-2">
-        <span className="text-xs font-semibold uppercase tracking-wide text-mist-500">{title}</span>
-        <button
-          onClick={onPopOut}
-          aria-label={`Pop out ${title}`}
-          title="Pop out"
-          className="text-mist-400 transition-colors hover:text-mist-700"
-        >
-          <PopOutIcon />
-        </button>
-      </div>
-      <div className="min-h-0 flex-1 overflow-hidden">{children}</div>
-      {resizeEdge && (
+      )}
+      {!isFloating && resizeEdge && (
         <div
           onPointerDown={handleDockResizeStart}
           aria-hidden="true"
