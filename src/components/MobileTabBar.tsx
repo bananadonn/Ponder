@@ -45,9 +45,9 @@ const TABS: { view: MobileView; label: string; icon: () => JSX.Element }[] = [
 ]
 
 // A persistent, always-reachable way to switch between the app's three main
-// views on mobile, where only one of Rack/Journal/Search & Reflect is ever
-// on screen at a time. Replaces the old header-only compass button, which
-// was easy to miss and gave no way back out of Reflect once in it.
+// views on mobile, where only one of Rack/Journal/Reflect is ever on screen
+// at a time. Replaces the old header-only compass button, which was easy to
+// miss and gave no way back out of Reflect once in it.
 export default function MobileTabBar({
   active,
   onSelect,
