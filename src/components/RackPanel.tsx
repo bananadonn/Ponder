@@ -58,10 +58,10 @@ export default function RackPanel({
   // re-fetch this panel's (possibly filtered) list without resetting its
   // filter UI state the way a remount would.
   refreshSignal?: number
-  // Reports the resolved filter set upward whenever it changes, so Search &
-  // Reflect's Retrieval mode can constrain its own search by the same
-  // filters. The Rack still owns the raw UI state (chips, dates) itself —
-  // only the resolved HybridFilters shape is shared.
+  // Reports the resolved filter set upward whenever it changes, so Reflect's
+  // raw search can constrain itself by the same filters. The Rack still owns
+  // the raw UI state (chips, dates) itself — only the resolved HybridFilters
+  // shape is shared.
   onFiltersChange?: (filters: HybridFilters) => void
 }) {
   const [showFilters, setShowFilters] = useState(false)

@@ -47,9 +47,9 @@ export default function MainLayout() {
   const [refreshSignal, setRefreshSignal] = useState(0)
   const refresh = () => setRefreshSignal((t) => t + 1)
 
-  // The Rack's resolved filters, shared down to Search & Reflect so
-  // Retrieval mode's search is constrained by the same emotion/topic/
-  // entity/date filters currently active in the Rack.
+  // The Rack's resolved filters, shared down to Reflect so its raw search
+  // is constrained by the same emotion/topic/entity/date filters currently
+  // active in the Rack (Reflect's own date filter layers on top of these).
   const [rackFilters, setRackFilters] = useState<HybridFilters>({})
 
   const [mobileView, setMobileView] = useState<MobileView>('list')
@@ -154,7 +154,7 @@ export default function MainLayout() {
 
             <DockPanel
               id="search"
-              title="Search & Reflect"
+              title="Reflect"
               layout={layout.search}
               onPopOut={() => popOut('search')}
               onDock={() => dock('search')}
