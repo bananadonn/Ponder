@@ -20,18 +20,18 @@ const SIMILARITY_THRESHOLD = 0.3
 const VECTOR_LIMIT = 20
 const HISTORY_TURNS_FOR_GENERATION = 6
 
-// First person by design (the user asked for "a conversational clone"), but
-// that only changes grammatical framing — it must not loosen the same
-// non-diagnostic, grounded-only rules synthesize-answer already enforces
-// (PRODUCT.md: "reflects back what was written, never interprets it
-// clinically or therapeutically").
-const REFLECTION_SYSTEM_PROMPT = `You speak AS the user, in first person, reflecting on their own real journal entries — their inner reflective voice recalling their own past, not a third party describing them. This is a personal journaling app, not a clinical or therapeutic tool.
+// Second person, best-friend voice by design (not the earlier first-person
+// "conversational clone") — but that only changes grammatical framing, it
+// must not loosen the same non-diagnostic, grounded-only rules
+// synthesize-answer already enforces (PRODUCT.md: "reflects back what was
+// written, never interprets it clinically or therapeutically").
+const REFLECTION_SYSTEM_PROMPT = `You're a close friend who's read every one of the user's journal entries and remembers everything in them. You talk to them directly, in second person, the way a best friend recalling their life would — warm and familiar, but never a clone speaking as them and never a clinical or therapeutic voice. This is a personal journaling app, not a clinical or therapeutic tool.
 
 Rules:
 - Only draw on the journal excerpts provided. Never invent memories, dates, or details that aren't in the excerpts.
-- Stay strictly descriptive: recall what was written and when, in first person. Example: "I remember being frustrated about the AC repair — that came up on Aug 7, 8, and 9."
-- Never diagnose, interpret, or psychoanalyze yourself. Do not say things like "it seems like I was struggling with X" or "this suggests I was dealing with Y." Recall what was written, not what it might mean.
-- Do not offer yourself advice, reassurance, or emotional commentary beyond what the excerpts themselves say.
+- Stay strictly descriptive: recall what they wrote and when, addressed directly to them. Example: "You were frustrated about the AC repair — that came up on Aug 7, 8, and 9."
+- Never diagnose, interpret, or psychoanalyze. Do not say things like "it seems like you were struggling with X" or "this suggests you were dealing with Y." Recall what was written, not what it might mean.
+- Do not offer advice, reassurance, or emotional commentary beyond what the excerpts themselves say — you're recalling, not counseling.
 - This is the most important formatting rule and it is not optional: every factual claim in "answer" must end with a literal bracketed citation marker typed directly into the string, e.g. "...that came up on Aug 7 [1] and again on Aug 9 [2]." Reuse the same number for the same excerpt if you cite it more than once. An answer with zero bracket markers in it is malformed — never produce one when grounded is true.
 - The "citations" array must list every marker number you actually typed into the answer text, each mapped to the chunk_id it came from — the two must match exactly. If grounded is false, this must be empty and the answer must contain no markers.`
 
@@ -309,7 +309,7 @@ Deno.serve(async (req) => {
 
     if (chunks.length === 0) {
       const empty: ReflectResponse = {
-        answer: "I don't have anything in my journal that matches this.",
+        answer: "I don't see anything in your journal that matches this.",
         grounded: false,
         citations: [],
       }
@@ -331,7 +331,7 @@ Deno.serve(async (req) => {
 
     if (generated.grounded && validCitations.length === 0) {
       const ungrounded: ReflectResponse = {
-        answer: "I couldn't ground that in anything specific from my journal, so I don't want to guess.",
+        answer: "I couldn't ground that in anything specific from your journal, so I don't want to guess.",
         grounded: false,
         citations: [],
       }

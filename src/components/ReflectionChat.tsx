@@ -98,7 +98,7 @@ export default function ReflectionChat({
           <div className="flex h-full flex-col items-center justify-center gap-3 px-6 text-center">
             <PonderMark className="h-7 w-auto text-mist-200" />
             <p className="text-sm text-mist-500">
-              Ask yourself something. Answers are grounded only in your own entries, with citations you can open.
+              Ask about your past. Answers are grounded only in your own entries, with citations you can open.
             </p>
           </div>
         ) : (
@@ -133,7 +133,7 @@ export default function ReflectionChat({
           type="text"
           value={input}
           onChange={(e) => setInput(e.target.value)}
-          placeholder="Ask yourself something…"
+          placeholder="Ask me anything…"
           disabled={loading}
           className="w-full rounded-soft border border-mist-200 bg-white px-3 py-2 text-sm text-mist-900 placeholder:text-mist-400 focus:border-mist-500 focus:outline-none focus:ring-2 focus:ring-mist-200 disabled:opacity-60"
         />
