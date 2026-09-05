@@ -10,6 +10,7 @@ import {
 } from '../_shared/queryEmbeddingInput.ts'
 import { extractQueryFilters, type QueryExtractionResult } from '../_shared/queryExtraction.ts'
 import { base64ToBytes, encrypt, getUserDek, importAesKey } from '../_shared/crypto.ts'
+import { assertUnderDailyCap, dailyCapResponse, DailyUsageCapError, recordUsage } from '../_shared/usage.ts'
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!
 const SERVICE_ROLE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!
@@ -113,6 +114,7 @@ interface VectorLegResult {
   rows: VectorRow[]
   queryEmbedding: number[]
   embeddingInput: QueryEmbeddingInput
+  costUsd: number
 }
 
 // Waits only on its own embedding input, not on query extraction — so this
@@ -126,7 +128,8 @@ async function runVectorLeg(
   apiKey: string,
 ): Promise<VectorLegResult> {
   const embeddingInput = await embeddingInputPromise
-  const [queryEmbedding] = await embedTexts([embeddingInput.text], apiKey)
+  const embedded = await embedTexts([embeddingInput.text], apiKey)
+  const [queryEmbedding] = embedded.vectors
 
   const { data, error } = await client.rpc('match_chunks', {
     query_embedding: queryEmbedding,
@@ -135,7 +138,7 @@ async function runVectorLeg(
   })
   if (error) throw error
 
-  return { rows: data ?? [], queryEmbedding, embeddingInput }
+  return { rows: data ?? [], queryEmbedding, embeddingInput, costUsd: embeddingInput.costUsd + embedded.costUsd }
 }
 
 interface FilterLegResult {
@@ -273,7 +276,19 @@ Deno.serve(async (req) => {
     global: { headers: { Authorization: req.headers.get('Authorization') ?? '' } },
   })
 
+  const { data: userData, error: userError } = await userClient.auth.getUser()
+  if (userError || !userData.user) {
+    return new Response(JSON.stringify({ error: 'Not authenticated' }), {
+      status: 401,
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+    })
+  }
+  const userId = userData.user.id
+
+  let costUsd = 0
   try {
+    await assertUnderDailyCap(userClient, userId)
+
     const embeddingStrategy: EmbeddingStrategy = isEmbeddingStrategy(body.embeddingStrategy)
       ? body.embeddingStrategy
       : DEFAULT_EMBEDDING_STRATEGY
@@ -293,6 +308,8 @@ Deno.serve(async (req) => {
         : Promise.resolve(null),
       runFilterLeg(userClient, body.filters, extractionPromise, filterLimit),
     ])
+
+    costUsd += (vectorLeg?.costUsd ?? 0) + (filterLeg.extraction?.costUsd ?? 0)
 
     const merged = new Map<string, MergedResult>()
 
@@ -434,10 +451,13 @@ Deno.serve(async (req) => {
       { headers: { ...corsHeaders, 'Content-Type': 'application/json' } },
     )
   } catch (err) {
+    if (err instanceof DailyUsageCapError) return dailyCapResponse(corsHeaders)
     const message = err instanceof Error ? err.message : 'Unknown error'
     return new Response(JSON.stringify({ error: message }), {
       status: 500,
       headers: { ...corsHeaders, 'Content-Type': 'application/json' },
     })
+  } finally {
+    await recordUsage(userClient, userId, 'hybrid-search', costUsd)
   }
 })

@@ -1,3 +1,5 @@
+import { chatCompletion } from './openai.ts'
+
 const HYDE_MODEL = 'gpt-4o-mini'
 
 const HYDE_SYSTEM_PROMPT = `Given this question about someone's journal, write a short (2-4 sentence) hypothetical journal entry, in first person, in a natural diary-writing tone, that would represent a relevant answer.
@@ -15,30 +17,22 @@ Do not answer the question directly or add commentary — just write the hypothe
  * it to drive the vector search leg, never surface it to the user or pass it
  * into synthesis.
  */
-export async function generateHypotheticalEntry(question: string, apiKey: string): Promise<string> {
-  const response = await fetch('https://api.openai.com/v1/chat/completions', {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
+export async function generateHypotheticalEntry(question: string, apiKey: string): Promise<{ text: string; costUsd: number }> {
+  const { json, costUsd } = await chatCompletion(
+    {
       model: HYDE_MODEL,
       messages: [
         { role: 'system', content: HYDE_SYSTEM_PROMPT },
         { role: 'user', content: question },
       ],
-    }),
-  })
+    },
+    apiKey,
+    'HyDE',
+  )
 
-  if (!response.ok) {
-    throw new Error(`OpenAI HyDE request failed: ${response.status} ${await response.text()}`)
-  }
-
-  const json = await response.json()
   const text: string | undefined = json.choices?.[0]?.message?.content?.trim()
   if (!text) {
     throw new Error('OpenAI HyDE request returned empty content')
   }
-  return text
+  return { text, costUsd }
 }

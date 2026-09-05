@@ -1,7 +1,12 @@
+import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
 import { corsHeaders } from '../_shared/cors.ts'
+import { chatCompletion } from '../_shared/openai.ts'
+import { assertUnderDailyCap, dailyCapResponse, DailyUsageCapError, recordUsage } from '../_shared/usage.ts'
 
 const SYNTHESIS_MODEL = 'gpt-4o-mini'
 
+const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!
+const ANON_KEY = Deno.env.get('SUPABASE_ANON_KEY')!
 const OPENAI_API_KEY = Deno.env.get('OPENAI_API_KEY')!
 
 const SYNTHESIS_SYSTEM_PROMPT = `You answer questions about the user's personal journal using only the excerpts provided. This is a personal journaling app, not a clinical or therapeutic tool.
@@ -48,14 +53,9 @@ function formatExcerpts(chunks: ChunkInput[]): string {
     .join('\n\n')
 }
 
-async function synthesize(question: string, results: ChunkInput[]): Promise<SynthesisResult> {
-  const response = await fetch('https://api.openai.com/v1/chat/completions', {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${OPENAI_API_KEY}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
+async function synthesize(question: string, results: ChunkInput[]): Promise<{ result: SynthesisResult; costUsd: number }> {
+  const { json, costUsd } = await chatCompletion(
+    {
       model: SYNTHESIS_MODEL,
       messages: [
         { role: 'system', content: SYNTHESIS_SYSTEM_PROMPT },
@@ -88,14 +88,11 @@ async function synthesize(question: string, results: ChunkInput[]): Promise<Synt
           },
         },
       },
-    }),
-  })
+    },
+    OPENAI_API_KEY,
+    'synthesis',
+  )
 
-  if (!response.ok) {
-    throw new Error(`OpenAI synthesis request failed: ${response.status} ${await response.text()}`)
-  }
-
-  const json = await response.json()
   const parsed: SynthesisResult = JSON.parse(json.choices[0].message.content)
 
   // Integrity check: only trust citations that actually point at excerpts we
@@ -107,13 +104,16 @@ async function synthesize(question: string, results: ChunkInput[]): Promise<Synt
 
   if (parsed.grounded && citedIds.length === 0) {
     return {
-      grounded: false,
-      answer: "The model didn't ground its answer in any of the provided excerpts, so it's being treated as unanswered rather than trusted as-is.",
-      cited_chunk_ids: [],
+      result: {
+        grounded: false,
+        answer: "The model didn't ground its answer in any of the provided excerpts, so it's being treated as unanswered rather than trusted as-is.",
+        cited_chunk_ids: [],
+      },
+      costUsd,
     }
   }
 
-  return { grounded: parsed.grounded, answer: parsed.answer, cited_chunk_ids: citedIds }
+  return { result: { grounded: parsed.grounded, answer: parsed.answer, cited_chunk_ids: citedIds }, costUsd }
 }
 
 Deno.serve(async (req) => {
@@ -154,16 +154,35 @@ Deno.serve(async (req) => {
     )
   }
 
+  const userClient = createClient(SUPABASE_URL, ANON_KEY, {
+    global: { headers: { Authorization: req.headers.get('Authorization') ?? '' } },
+  })
+  const { data: userData, error: userError } = await userClient.auth.getUser()
+  if (userError || !userData.user) {
+    return new Response(JSON.stringify({ error: 'Not authenticated' }), {
+      status: 401,
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+    })
+  }
+  const userId = userData.user.id
+
+  let costUsd = 0
   try {
-    const result = await synthesize(question, body.results)
-    return new Response(JSON.stringify(result), {
+    await assertUnderDailyCap(userClient, userId)
+
+    const synthesized = await synthesize(question, body.results)
+    costUsd = synthesized.costUsd
+    return new Response(JSON.stringify(synthesized.result), {
       headers: { ...corsHeaders, 'Content-Type': 'application/json' },
     })
   } catch (err) {
+    if (err instanceof DailyUsageCapError) return dailyCapResponse(corsHeaders)
     const message = err instanceof Error ? err.message : 'Unknown error'
     return new Response(JSON.stringify({ error: message }), {
       status: 500,
       headers: { ...corsHeaders, 'Content-Type': 'application/json' },
     })
+  } finally {
+    await recordUsage(userClient, userId, 'synthesize-answer', costUsd)
   }
 })

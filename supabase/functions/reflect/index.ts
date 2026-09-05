@@ -1,8 +1,9 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
-import { embedTexts } from '../_shared/openai.ts'
+import { chatCompletion, embedTexts } from '../_shared/openai.ts'
 import { corsHeaders } from '../_shared/cors.ts'
 import { buildQueryEmbeddingInput } from '../_shared/queryEmbeddingInput.ts'
 import { base64ToBytes, decryptOrPassthrough, getUserDek, importAesKey } from '../_shared/crypto.ts'
+import { assertUnderDailyCap, dailyCapResponse, DailyUsageCapError, recordUsage } from '../_shared/usage.ts'
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!
 const SERVICE_ROLE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!
@@ -87,16 +88,18 @@ function hasActiveFilters(filters?: Filters): boolean {
 // Retrieval-only — the rewritten text is never surfaced to the user or fed
 // into generation, same "fabricated, drive search only" contract HyDE's
 // generateHypotheticalEntry already follows in _shared/hyde.ts.
-async function rewriteQuery(message: string, history: HistoryTurn[], apiKey: string): Promise<string> {
+async function rewriteQuery(
+  message: string,
+  history: HistoryTurn[],
+  apiKey: string,
+): Promise<{ text: string; costUsd: number }> {
   const transcript = history
     .slice(-HISTORY_TURNS_FOR_GENERATION)
     .map((t) => `${t.role === 'user' ? 'Q' : 'A'}: ${t.content}`)
     .join('\n')
 
-  const response = await fetch('https://api.openai.com/v1/chat/completions', {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({
+  const { json, costUsd } = await chatCompletion(
+    {
       model: REWRITE_MODEL,
       messages: [
         {
@@ -106,16 +109,13 @@ async function rewriteQuery(message: string, history: HistoryTurn[], apiKey: str
         },
         { role: 'user', content: `Conversation so far:\n${transcript}\n\nLatest message: ${message}` },
       ],
-    }),
-  })
+    },
+    apiKey,
+    'rewrite',
+  )
 
-  if (!response.ok) {
-    throw new Error(`OpenAI rewrite request failed: ${response.status} ${await response.text()}`)
-  }
-
-  const json = await response.json()
   const text: string | undefined = json.choices?.[0]?.message?.content?.trim()
-  return text || message
+  return { text: text || message, costUsd }
 }
 
 function formatExcerpts(chunks: RetrievedChunk[]): string {
@@ -155,7 +155,7 @@ async function generateReflection(
   history: HistoryTurn[],
   chunks: RetrievedChunk[],
   apiKey: string,
-): Promise<GenerationResult> {
+): Promise<{ result: GenerationResult; costUsd: number }> {
   const transcript = history
     .slice(-HISTORY_TURNS_FOR_GENERATION)
     .map((t) => `${t.role === 'user' ? 'Q' : 'A'}: ${t.content}`)
@@ -169,10 +169,8 @@ async function generateReflection(
     .filter(Boolean)
     .join('\n\n')
 
-  const response = await fetch('https://api.openai.com/v1/chat/completions', {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({
+  const { json, costUsd } = await chatCompletion(
+    {
       model: REFLECTION_MODEL,
       messages: [
         { role: 'system', content: REFLECTION_SYSTEM_PROMPT },
@@ -214,15 +212,12 @@ async function generateReflection(
           },
         },
       },
-    }),
-  })
+    },
+    apiKey,
+    'reflection',
+  )
 
-  if (!response.ok) {
-    throw new Error(`OpenAI reflection request failed: ${response.status} ${await response.text()}`)
-  }
-
-  const json = await response.json()
-  return JSON.parse(json.choices[0].message.content)
+  return { result: JSON.parse(json.choices[0].message.content), costUsd }
 }
 
 Deno.serve(async (req) => {
@@ -253,11 +248,31 @@ Deno.serve(async (req) => {
     global: { headers: { Authorization: req.headers.get('Authorization') ?? '' } },
   })
 
+  const { data: userData, error: userError } = await userClient.auth.getUser()
+  if (userError || !userData.user) {
+    return new Response(JSON.stringify({ error: 'Not authenticated' }), {
+      status: 401,
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+    })
+  }
+  const userId = userData.user.id
+
+  let costUsd = 0
   try {
-    const rewritten = history.length > 0 ? await rewriteQuery(message, history, OPENAI_API_KEY) : message
+    await assertUnderDailyCap(userClient, userId)
+
+    let rewritten = message
+    if (history.length > 0) {
+      const rewrite = await rewriteQuery(message, history, OPENAI_API_KEY)
+      rewritten = rewrite.text
+      costUsd += rewrite.costUsd
+    }
 
     const embeddingInput = await buildQueryEmbeddingInput(rewritten, 'hyde', OPENAI_API_KEY)
-    const [queryEmbedding] = await embedTexts([embeddingInput.text], OPENAI_API_KEY)
+    costUsd += embeddingInput.costUsd
+    const embedded = await embedTexts([embeddingInput.text], OPENAI_API_KEY)
+    costUsd += embedded.costUsd
+    const [queryEmbedding] = embedded.vectors
 
     const { data: vectorRows, error: vectorError } = await userClient.rpc('match_chunks', {
       query_embedding: queryEmbedding,
@@ -285,10 +300,8 @@ Deno.serve(async (req) => {
       // Unlike hybrid-search/search-chunks (pure pass-through -- the client
       // decrypts chunk text itself), this function builds the LLM prompt
       // from chunk text directly, so it needs plaintext here.
-      const { data: userData, error: userError } = await userClient.auth.getUser()
-      if (userError || !userData.user) throw userError ?? new Error('Not authenticated')
       const masterKey = await masterKeyPromise
-      const dek = await getUserDek(admin, masterKey, userData.user.id)
+      const dek = await getUserDek(admin, masterKey, userId)
       chunks = await Promise.all(
         chunks.map(async (c) => ({ ...c, text: (await decryptOrPassthrough(dek, c.text))! })),
       )
@@ -303,7 +316,8 @@ Deno.serve(async (req) => {
       return new Response(JSON.stringify(empty), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } })
     }
 
-    const generated = await generateReflection(message, history, chunks, OPENAI_API_KEY)
+    const { result: generated, costUsd: generationCost } = await generateReflection(message, history, chunks, OPENAI_API_KEY)
+    costUsd += generationCost
 
     // Same integrity check as synthesize-answer: only trust citations that
     // actually point at excerpts we sent.
@@ -330,10 +344,13 @@ Deno.serve(async (req) => {
     const result: ReflectResponse = { answer, grounded: generated.grounded, citations: validCitations }
     return new Response(JSON.stringify(result), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } })
   } catch (err) {
+    if (err instanceof DailyUsageCapError) return dailyCapResponse(corsHeaders)
     const messageText = err instanceof Error ? err.message : 'Unknown error'
     return new Response(JSON.stringify({ error: messageText }), {
       status: 500,
       headers: { ...corsHeaders, 'Content-Type': 'application/json' },
     })
+  } finally {
+    await recordUsage(userClient, userId, 'reflect', costUsd)
   }
 })
