@@ -1,15 +1,15 @@
 // Envelope-encryption primitives (AES-256-GCM via WebCrypto).
 //
 // Keep the primitives section of this file byte-for-byte identical across:
-//   src/lib/crypto.ts, supabase/functions/_shared/crypto.ts, scripts/crypto.mjs
-// Three runtimes (browser, Deno, Node), no shared build step between them --
+//   src/lib/crypto.ts, supabase/functions/_shared/crypto.ts
+// Two runtimes (browser, Deno), no shared build step between them --
 // see supabase/functions/_shared/richDocPlainText.ts for the same
 // hand-sync convention already used in this codebase. The getUserDek*
-// section below is server-only (appears here and in scripts/crypto.mjs,
-// not in src/lib/crypto.ts -- the browser never touches user_keys).
+// section below is server-only (not in src/lib/crypto.ts -- the browser
+// never touches user_keys).
 //
 // btoa/atob/crypto.subtle/crypto.getRandomValues are global and behave
-// identically in browsers, Deno, and Node >=19.
+// identically in browsers and Deno.
 
 import type { SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2'
 

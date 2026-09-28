@@ -2,13 +2,13 @@
 //
 // Keep this file byte-for-byte identical (primitives section only -- this
 // file has no server-only extension) across:
-//   src/lib/crypto.ts, supabase/functions/_shared/crypto.ts, scripts/crypto.mjs
-// Three runtimes (browser, Deno, Node), no shared build step between them --
+//   src/lib/crypto.ts, supabase/functions/_shared/crypto.ts
+// Two runtimes (browser, Deno), no shared build step between them --
 // see supabase/functions/_shared/richDocPlainText.ts for the same
 // hand-sync convention already used in this codebase.
 //
 // btoa/atob/crypto.subtle/crypto.getRandomValues are global and behave
-// identically in browsers, Deno, and Node >=19.
+// identically in browsers and Deno.
 
 const ALGO = 'AES-GCM'
 const IV_BYTES = 12
