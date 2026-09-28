@@ -29,7 +29,6 @@ A minimal journaling app: markdown entries, Supabase auth + Postgres, basic sear
 - `src/components/` — small presentational pieces.
 - `src/lib/supabase.ts` — Supabase client instance.
 - `supabase/functions/` — server-side Edge Functions (Deno). Anything that needs a secret API key or must bypass RLS lives here, never in `src/`.
-- `scripts/` — one-off admin/maintenance scripts run locally with Node, using the service role key.
 
 ## Out of scope for v1
 
@@ -60,18 +59,9 @@ Entries are split into paragraph chunks and embedded (OpenAI `text-embedding-3-s
 
    Every entry save now triggers processing in the background; it doesn't block the save or depend on the tab staying open.
 
-### Backfilling existing entries
-
-Entries created before this phase existed sit at `processing_status = 'pending'`. Copy `scripts/.env.example` to `scripts/.env`, fill in `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` (Project Settings → API — this key bypasses RLS, keep it out of the client `.env` and out of git), then:
-
-```
-node --env-file=scripts/.env scripts/reprocess-entries.mjs          # only non-complete entries
-node --env-file=scripts/.env scripts/reprocess-entries.mjs --all    # everything, e.g. after a chunking change
-```
-
 ### Sanity-checking chunk boundaries
 
-Visit `/debug/chunks` while signed in. It lists your entries with their `processing_status`, and expanding one shows each chunk's text, length, and whether it has an embedding yet. There's also a per-entry "Reprocess" button for iterating on a single entry without running the full script.
+Visit `/debug/chunks` while signed in. It lists your entries with their `processing_status`, and expanding one shows each chunk's text, length, and whether it has an embedding yet. There's also a per-entry "Reprocess" button for iterating on a single entry without reprocessing everything.
 
 ## RAG pipeline — phase 2: structured metadata extraction
 
